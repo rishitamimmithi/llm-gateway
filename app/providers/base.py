@@ -9,6 +9,8 @@ import math
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 
+import httpx
+
 
 @dataclass(frozen=True)
 class ProviderResponse:
@@ -73,3 +75,88 @@ def parse_retry_after(value: str | None) -> float | None:
         return None  # HTTP-date format is allowed by the spec but rare from LLM APIs; ignore it
     # isfinite rejects "inf" and "nan": waiting forever would hang the request
     return seconds if math.isfinite(seconds) and seconds >= 0 else None
+
+
+async def send_request(
+    provider: str,
+    client: httpx.AsyncClient,
+    url: str,
+    *,
+    json: dict,
+    headers: dict,
+    timeout: float,
+    secret: str,
+) -> httpx.Response:
+    """POST to a provider and turn every failure into a labelled ProviderError.
+
+    Shared by all HTTP providers, so they all fail in the same, predictable way.
+    Returns the response only if it was a success (2xx); parsing the body is the provider's job.
+    """
+    try:
+        # Note: httpx applies this timeout to each phase (connect, read, ...), not the whole call.
+        resp = await client.post(url, json=json, headers=headers, timeout=timeout)
+    except httpx.TimeoutException as e:
+        raise ProviderError(provider, f"timed out after {timeout}s", retryable=True) from e
+    except httpx.TransportError as e:  # could not connect, connection dropped, DNS failure...
+        raise ProviderError(provider, f"network error: {type(e).__name__}", retryable=True) from e
+    except httpx.HTTPError as e:  # anything else httpx raises (garbled body, too many redirects...)
+        raise ProviderError(provider, f"HTTP client error: {type(e).__name__}", retryable=False) from e
+    except (ValueError, httpx.InvalidURL) as e:
+        # The request could not even be built, e.g. a curly quote pasted into the API key in .env.
+        # Only the error TYPE is reported: its text could contain part of the key.
+        raise ProviderError(provider, f"could not build request: {type(e).__name__}", retryable=False) from e
+
+    if not resp.is_success:
+        raise ProviderError(
+            provider,
+            f"HTTP {resp.status_code}: {error_message(resp, secret)}",
+            retryable=is_retryable_status(resp.status_code),
+            status_code=resp.status_code,
+            retry_after=retry_after_seconds(resp),
+        )
+    return resp
+
+
+def error_message(resp: httpx.Response, secret: str) -> str:
+    """Pull a short, human-readable reason out of an error response.
+
+    Groq and Gemini both use {"error": {"message": ...}}. The provider's text is outside our
+    control, so any copy of our API key (the secret) is blacked out before it reaches logs or clients.
+    """
+    try:
+        message = str(resp.json()["error"]["message"])
+    except (ValueError, KeyError, TypeError):
+        message = resp.text
+    if secret:  # replace("") would insert *** between every character
+        message = message.replace(secret, "***")
+    return message[:200]
+
+
+def retry_after_seconds(resp: httpx.Response) -> float | None:
+    """How long the provider asked us to wait, if it said so.
+
+    Standard: a Retry-After header ("2"). Google may instead put it in the body:
+    {"error": {"details": [{"retryDelay": "30s"}]}}.
+    """
+    from_header = parse_retry_after(resp.headers.get("retry-after"))
+    if from_header is not None:
+        return from_header
+    try:
+        for detail in resp.json()["error"]["details"]:
+            delay = detail.get("retryDelay")
+            if isinstance(delay, str) and delay.endswith("s"):
+                seconds = parse_retry_after(delay[:-1])
+                if seconds is not None:  # skip a broken entry and keep looking
+                    return seconds
+    except (ValueError, KeyError, TypeError, AttributeError):
+        pass
+    return None
+
+
+def to_count(value: object) -> int:
+    """Turn a token count from a provider into a safe int. Anything broken ("abc", NaN, Infinity,
+    None, negative) becomes 0: a good answer shouldn't be thrown away over a bad counter."""
+    try:
+        return max(0, int(value or 0))
+    except (TypeError, ValueError, OverflowError):
+        return 0
