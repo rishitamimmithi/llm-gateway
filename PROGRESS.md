@@ -12,9 +12,10 @@ Phase 2 — Multiple providers + fallback + circuit breaker
 - Phase 2 Step 2: provider interface + Groq provider with retryable / non-retryable error labels
 - Phase 2 Step 3: Gemini provider (`gemini-3.1-flash-lite`) + shared request error handling
 - Phase 2 Step 4: retries with exponential backoff + jitter, per-provider timeouts, config checked at startup
+- Phase 2 Step 5: circuit breaker per provider (not yet wired into /chat — Step 6)
 
 ## In progress
-- Phase 2 Step 5: circuit breaker
+- Phase 2 Step 6: router with fallback
 
 ## Open bugs / questions
 - Gemini free tier is slow and unpredictable (1–22 s for tiny answers, one 30 s timeout)
@@ -22,9 +23,9 @@ Phase 2 — Multiple providers + fallback + circuit breaker
 - MAX_TOKENS (cut-off) answers count as success; revisit before caching in Phase 4
 
 ## Next steps
-1. Step 5: circuit breaker per provider
-2. Step 6: router with fallback (Groq → Gemini), 503 when all fail
-3. Step 7: cost tracking
+1. Step 6: router with fallback (Groq → Gemini), 503 when all fail, breaker per provider
+2. Step 7: cost tracking
+3. Step 9: failover demo + verify Phase 2
 
 ## To learn later
 - `app/config.py` — settings in one place; checking numbers at startup
@@ -34,9 +35,11 @@ Phase 2 — Multiple providers + fallback + circuit breaker
 - `app/providers/gemini.py` — generateContent API; "200 but no answer" cases; thinking tokens billed as output
 - `app/core/retry.py` — exponential backoff with jitter; respecting Retry-After; when to give up
 - `tests/` — fake internet with `httpx.MockTransport`; fake sleep for instant retry tests
+- `app/core/circuit_breaker.py` — CLOSED / OPEN / HALF_OPEN; one trial at a time; generation number so late results are ignored; which errors count
 
 ## To rebuild myself later
 - `app/core/retry.py` — retry with exponential backoff and jitter
+- `app/core/circuit_breaker.py` — circuit breaker state machine
 
 ## Improvement ideas
 - Log one row per attempt (attempt number, error type) instead of one per request

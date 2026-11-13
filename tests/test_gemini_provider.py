@@ -8,6 +8,7 @@ import httpx
 import pytest
 import pytest_asyncio
 
+from app.core.circuit_breaker import counts_as_failure
 from app.providers.base import ProviderError
 from app.providers.gemini import GeminiProvider
 
@@ -222,6 +223,38 @@ def test_model_name_is_cleaned_for_the_url(model, url_end):
     provider = GeminiProvider("key", model, client=httpx.AsyncClient())
     assert provider.url.endswith(url_end)
     assert "?" not in provider.url and "#" not in provider.url
+
+
+@pytest.mark.asyncio
+async def test_bad_key_400_is_relabelled_401_so_it_counts_in_the_breaker(make_provider):
+    # The real body Gemini sent for a bad key on 2026-11-14
+    body = {"error": {"code": 400, "message": "API key not valid. Please pass a valid API key.",
+                      "status": "INVALID_ARGUMENT", "details": [{"reason": "API_KEY_INVALID"}]}}
+    error = await chat_error(make_provider(respond(400, body)))
+    assert error.status_code == 401
+    assert error.retryable is False
+    assert "API key not valid" in str(error)
+    assert counts_as_failure(error)
+
+
+@pytest.mark.asyncio
+async def test_other_400s_stay_400_and_do_not_count(make_provider):
+    body = {"error": {"code": 400, "message": "Invalid JSON payload", "status": "INVALID_ARGUMENT"}}
+    error = await chat_error(make_provider(respond(400, body)))
+    assert error.status_code == 400
+    assert not counts_as_failure(error)
+
+
+@pytest.mark.asyncio
+async def test_broken_success_body_counts_as_provider_fault(make_provider):
+    error = await chat_error(make_provider(respond(200, {"candidates": []})))
+    assert counts_as_failure(error)
+
+
+@pytest.mark.asyncio
+async def test_blocked_prompt_does_not_count_as_provider_fault(make_provider):
+    error = await chat_error(make_provider(respond(200, {"promptFeedback": {"blockReason": "SAFETY"}})))
+    assert not counts_as_failure(error)
 
 
 @pytest.mark.asyncio

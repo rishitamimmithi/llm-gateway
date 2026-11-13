@@ -35,15 +35,22 @@ class GeminiProvider(Provider):
         if not self.api_key:
             raise ProviderError(self.name, "API key is missing", retryable=False)
 
-        resp = await send_request(
-            self.name,
-            self._client,
-            self.url,
-            json={"contents": [{"role": "user", "parts": [{"text": prompt}]}]},
-            headers={"x-goog-api-key": self.api_key},  # header, not ?key=, so the key never sits in a URL
-            timeout=self.timeout,
-            secret=self.api_key,
-        )
+        try:
+            resp = await send_request(
+                self.name,
+                self._client,
+                self.url,
+                json={"contents": [{"role": "user", "parts": [{"text": prompt}]}]},
+                headers={"x-goog-api-key": self.api_key},  # header, not ?key=, so the key never sits in a URL
+                timeout=self.timeout,
+                secret=self.api_key,
+            )
+        except ProviderError as e:
+            # Gemini reports a bad key as 400 ("API key not valid"), which looks like a bad prompt.
+            # Re-label it 401 so it counts against the provider (circuit breaker) like any bad key.
+            if e.status_code == 400 and "API key not valid" in str(e):
+                raise ProviderError(self.name, str(e).split("] ", 1)[-1], retryable=False, status_code=401) from e
+            raise
 
         try:
             data = resp.json()
@@ -90,4 +97,5 @@ class GeminiProvider(Provider):
         await self._client.aclose()
 
     def _bad_format(self, resp: httpx.Response) -> ProviderError:
-        return ProviderError(self.name, "unexpected response format", retryable=False, status_code=resp.status_code)
+        # status_code=None: a broken success body is the provider's fault, so it counts in the breaker
+        return ProviderError(self.name, "unexpected response format", retryable=False)

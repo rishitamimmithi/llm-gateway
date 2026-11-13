@@ -47,5 +47,9 @@ MAX_ATTEMPTS: int = read_number("MAX_ATTEMPTS", "3", cast=int)  # 1 first try + 
 RETRY_BASE_DELAY_SECONDS: float = read_number("RETRY_BASE_DELAY_SECONDS", "0.5", allow_zero=True)
 RETRY_MAX_DELAY_SECONDS: float = read_number("RETRY_MAX_DELAY_SECONDS", "4")  # never wait longer than this
 
+# --- Circuit breaker (one per provider) ---
+BREAKER_FAILURE_THRESHOLD: int = read_number("BREAKER_FAILURE_THRESHOLD", "3", cast=int)  # failed requests in a row
+BREAKER_COOLDOWN_SECONDS: float = read_number("BREAKER_COOLDOWN_SECONDS", "30")  # skip time before one trial call
+
 # --- Database ---
 DB_PATH: str = os.getenv("DB_PATH", "requests.db")

@@ -54,9 +54,8 @@ class GroqProvider(Provider):
             completion_tokens = to_count(usage.get("completion_tokens"))
         except (ValueError, KeyError, IndexError, TypeError, AttributeError) as e:
             # A success code with a broken body is unexpected; retrying the same call is unlikely to fix it.
-            raise ProviderError(
-                self.name, "unexpected response format", retryable=False, status_code=resp.status_code
-            ) from e
+            # status_code=None: it's the provider's fault, so it counts in the circuit breaker.
+            raise ProviderError(self.name, "unexpected response format", retryable=False) from e
 
         return ProviderResponse(
             text=text,
