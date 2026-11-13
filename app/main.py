@@ -1,16 +1,26 @@
 """
 LLM Gateway - FastAPI routes.
-/chat sends the prompt through the router: providers in order, retries, circuit breakers, fallback.
+/chat checks the client's API key and rate limit, then sends the prompt through the router:
+providers in order, retries, circuit breakers, fallback.
 """
 import logging
+import math
 import time
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException, Response
 from pydantic import BaseModel
+from redis.asyncio import Redis
+from redis.asyncio.retry import Retry
+from redis.backoff import NoBackoff
 
 from app import config
+from app.core.api_keys import ApiKeys
 from app.core.circuit_breaker import CircuitBreaker
+from app.core.rate_limiter import RateLimiter
+from app.core.redis_limiters import RedisSlidingWindowLimiter, RedisTokenBucketLimiter
+from app.core.sliding_window import SlidingWindowLimiter
+from app.core.token_bucket import TokenBucketLimiter
 from app.core.cost import estimate_cost
 from app.core.router import AllProvidersFailed, Route, Router
 from app.db.logger import COST_DECIMALS, RequestLog
@@ -65,14 +75,36 @@ def build_router() -> Router:
     )
 
 
+def build_limiter() -> RateLimiter:
+    """Pick the algorithm from config; keep its state in Redis if REDIS_URL is set, else in memory."""
+    token_bucket = config.RATE_LIMIT_ALGORITHM == "token_bucket"
+    if config.REDIS_URL:
+        # No client-side retries: if Redis is down we'd rather fail open fast than make every request wait.
+        redis = Redis.from_url(
+            config.REDIS_URL, socket_timeout=0.5, socket_connect_timeout=0.5, retry=Retry(NoBackoff(), 0)
+        )
+        if token_bucket:
+            return RedisTokenBucketLimiter(redis, config.TOKEN_BUCKET_CAPACITY, config.TOKEN_BUCKET_REFILL_PER_SECOND)
+        return RedisSlidingWindowLimiter(redis, config.SLIDING_WINDOW_LIMIT, config.SLIDING_WINDOW_SECONDS)
+    if token_bucket:
+        return TokenBucketLimiter(config.TOKEN_BUCKET_CAPACITY, config.TOKEN_BUCKET_REFILL_PER_SECOND)
+    return SlidingWindowLimiter(config.SLIDING_WINDOW_LIMIT, config.SLIDING_WINDOW_SECONDS)
+
+
 # The router that answers /chat (tests swap this for one with fake providers)
 router: Router = build_router()
+# Valid client keys and the per-client rate limiter (tests swap these too)
+api_keys = ApiKeys(config.GATEWAY_API_KEYS)
+limiter: RateLimiter = build_limiter()
+if not len(api_keys):
+    logger.warning("No GATEWAY_API_KEYS set: every /chat request will be rejected with 401")
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     yield  # the server runs while we are "paused" here
     await router.aclose()  # on shutdown: close the providers' shared network connections
+    await limiter.aclose()
 
 
 app = FastAPI(title="LLM Gateway", lifespan=lifespan)
@@ -92,8 +124,27 @@ def provider_health() -> list[dict]:
     return router.health()
 
 
+async def rate_limited_client(response: Response, x_api_key: str | None = Header(default=None)) -> str:
+    """Runs before /chat: check the API key (401), then the client's rate limit (429)."""
+    client_id = api_keys.client_id(x_api_key)
+    if client_id is None:
+        raise HTTPException(status_code=401, detail="Missing or invalid API key", headers={"WWW-Authenticate": "ApiKey"})
+
+    decision = await limiter.check(client_id)
+    if not decision.allowed:
+        retry_after = max(1, math.ceil(decision.retry_after))  # header must be whole seconds; never tell a client 0
+        logger.info("Rate limited client %s, retry after %ss", client_id, retry_after)
+        raise HTTPException(
+            status_code=429,
+            detail="Rate limit exceeded",
+            headers={"Retry-After": str(retry_after), "X-RateLimit-Remaining": "0"},
+        )
+    response.headers["X-RateLimit-Remaining"] = str(decision.remaining)
+    return client_id
+
+
 @app.post("/chat")
-async def chat(req: ChatRequest) -> dict:
+async def chat(req: ChatRequest, client_id: str = Depends(rate_limited_client)) -> dict:
     start = time.perf_counter()
     try:
         result = await router.chat(req.prompt)

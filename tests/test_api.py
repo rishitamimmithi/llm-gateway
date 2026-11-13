@@ -6,7 +6,9 @@ import pytest
 from fastapi.testclient import TestClient
 
 import app.main as main
+from app.core.api_keys import ApiKeys
 from app.core.circuit_breaker import CircuitBreaker
+from app.core.token_bucket import TokenBucketLimiter
 from app.core.router import Route, Router
 from app.db.logger import RequestLog
 from app.providers.base import Provider, ProviderError, ProviderResponse
@@ -30,6 +32,9 @@ class FakeProvider(Provider):
         return ProviderResponse(f"{self.name}: {prompt}", self.name, self.model, prompt_tokens=4, completion_tokens=6)
 
 
+TEST_KEY = "test-client-key"
+
+
 def temporary(name: str) -> ProviderError:
     return ProviderError(name, "HTTP 503: down", retryable=True, status_code=503)
 
@@ -47,7 +52,9 @@ def client(monkeypatch):
     temp_log = RequestLog(":memory:")
     monkeypatch.setattr(main, "request_log", temp_log)
     monkeypatch.setattr(main, "router", make_router(FakeProvider()))
-    yield TestClient(main.app)
+    monkeypatch.setattr(main, "api_keys", ApiKeys([TEST_KEY]))
+    monkeypatch.setattr(main, "limiter", TokenBucketLimiter(capacity=1000, refill_per_second=1))  # never in the way
+    yield TestClient(main.app, headers={"X-API-Key": TEST_KEY})
     temp_log.close()
 
 

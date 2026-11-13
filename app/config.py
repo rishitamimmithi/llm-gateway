@@ -65,5 +65,21 @@ MODEL_PRICES: dict[str, tuple[float, float]] = {
     "gemini-3.1-flash-lite": (0.25, 1.50),  # output price includes thinking tokens
 }
 
+# --- Client API keys (comma-separated). Every /chat call needs one in the X-API-Key header. ---
+GATEWAY_API_KEYS: list[str] = [k.strip() for k in os.getenv("GATEWAY_API_KEYS", "").split(",") if k.strip()]
+
+# --- Rate limiting (per client API key) ---
+RATE_LIMIT_ALGORITHM: str = os.getenv("RATE_LIMIT_ALGORITHM", "token_bucket").strip().lower()
+if RATE_LIMIT_ALGORITHM not in ("token_bucket", "sliding_window"):
+    raise ValueError(f"RATE_LIMIT_ALGORITHM must be token_bucket or sliding_window, got {RATE_LIMIT_ALGORITHM!r}")
+# Token bucket: burst of up to CAPACITY requests, then REFILL_PER_SECOND on average (0.2/s = 12 per minute)
+TOKEN_BUCKET_CAPACITY: int = read_number("TOKEN_BUCKET_CAPACITY", "10", cast=int)
+TOKEN_BUCKET_REFILL_PER_SECOND: float = read_number("TOKEN_BUCKET_REFILL_PER_SECOND", "0.2")
+# Sliding window: at most LIMIT requests in any WINDOW_SECONDS stretch
+SLIDING_WINDOW_LIMIT: int = read_number("SLIDING_WINDOW_LIMIT", "12", cast=int)
+SLIDING_WINDOW_SECONDS: float = read_number("SLIDING_WINDOW_SECONDS", "60")
+# Empty = limits kept in this process's memory. Set (e.g. redis://localhost:6379/0) to share limits across instances.
+REDIS_URL: str = os.getenv("REDIS_URL", "").strip()
+
 # --- Database ---
 DB_PATH: str = os.getenv("DB_PATH", "requests.db")
