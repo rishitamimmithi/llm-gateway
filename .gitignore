@@ -1,0 +1,9 @@
+# Secrets - never commit real keys
+.env
+
+# Python virtual environment and bytecode cache
+.venv/
+__pycache__/
+
+# Local SQLite databases (requests.db etc.)
+*.db
