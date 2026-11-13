@@ -1,11 +1,14 @@
 """
 API tests for the gateway routes. They never call a real provider and never touch requests.db.
 """
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 
 import app.main as main
 from app.db.logger import RequestLog
+from app.providers.base import Provider, ProviderError, ProviderResponse
+from app.providers.groq import GroqProvider
 
 
 @pytest.fixture
@@ -45,11 +48,67 @@ def test_stats_counts_only_successful_requests(client):
     }
 
 
-def test_chat_without_api_key_returns_500(client, monkeypatch):
-    monkeypatch.setattr(main.config, "GROQ_API_KEY", None)
+def make_groq(handler, api_key: str | None) -> GroqProvider:
+    """A real GroqProvider wired to a fake internet (no real calls)."""
+    return GroqProvider(api_key, "test-model", client=httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+
+
+def test_chat_without_api_key_returns_502_with_clear_message(client, monkeypatch):
+    monkeypatch.setattr(main, "provider", make_groq(lambda req: httpx.Response(200), api_key=None))
     resp = client.post("/chat", json={"prompt": "hi"})
-    assert resp.status_code == 500
-    assert "GROQ_API_KEY" in resp.json()["detail"]
+    assert resp.status_code == 502
+    assert "API key is missing" in resp.json()["detail"]
+
+
+def test_chat_502_detail_never_contains_the_api_key(client, monkeypatch):
+    key = "gsk_test_SECRET_456"
+    echo_key = lambda req: httpx.Response(401, text=req.headers["authorization"])  # noqa: E731
+    monkeypatch.setattr(main, "provider", make_groq(echo_key, api_key=key))
+
+    resp = client.post("/chat", json={"prompt": "hi"})
+
+    assert resp.status_code == 502
+    assert key not in resp.text
+
+
+class FakeProvider(Provider):
+    """Stands in for Groq: either answers or raises the error we give it."""
+
+    name = "fake"
+    model = "fake-model"
+
+    def __init__(self, error: ProviderError | None = None) -> None:
+        self.error = error
+
+    async def chat(self, prompt: str) -> ProviderResponse:
+        if self.error:
+            raise self.error
+        return ProviderResponse(f"echo: {prompt}", self.name, self.model, prompt_tokens=4, completion_tokens=6)
+
+
+def test_chat_success_returns_answer_and_logs_it(client, monkeypatch):
+    monkeypatch.setattr(main, "provider", FakeProvider())
+
+    resp = client.post("/chat", json={"prompt": "hi"})
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["answer"] == "echo: hi"
+    assert body["usage"] == {"prompt_tokens": 4, "completion_tokens": 6, "total_tokens": 10}
+    assert client.get("/stats").json()["successful_requests"] == 1
+
+
+def test_chat_provider_error_returns_502_and_logs_error(client, monkeypatch):
+    error =ProviderError("fake", "HTTP 503: down", retryable=True, status_code=503)
+    monkeypatch.setattr(main, "provider", FakeProvider(error))
+
+    resp = client.post("/chat", json={"prompt": "hi"})
+
+    assert resp.status_code == 502
+    assert "HTTP 503" in resp.json()["detail"]
+    assert client.get("/stats").json()["successful_requests"] == 0  # errors are not counted as successes
+    status = main.request_log.db.execute("SELECT status FROM requests").fetchone()[0]
+    assert status == "error"  # ...but they are still logged
 
 
 def test_chat_rejects_missing_prompt(client):
