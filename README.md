@@ -14,7 +14,7 @@ provider fallback and cost tracking.
    - Mac/Linux: `source .venv/bin/activate`
 2. `pip install -r requirements.txt` (for development and tests: `pip install -r requirements-dev.txt`, then run `pytest`)
 3. Copy `.env.example` to `.env` and add your Groq API key
-4. `uvicorn main:app --reload`
+4. `uvicorn app.main:app --reload`
 5. Open http://127.0.0.1:8000/docs and try `/chat`
 
 ## Roadmap
