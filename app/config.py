@@ -36,6 +36,9 @@ GEMINI_API_KEY: str | None = os.getenv("GEMINI_API_KEY")
 # Stable, free-tier "flash-lite" model; avoid gemini-2.5-flash (deprecated, rerouted from 2026-12-01)
 GEMINI_MODEL: str = os.getenv("GEMINI_MODEL", "gemini-3.1-flash-lite")
 
+# --- Routing: providers tried in this order (first = main, the rest = backups) ---
+PROVIDER_ORDER: list[str] = [p.strip() for p in os.getenv("PROVIDER_ORDER", "groq,gemini").split(",") if p.strip()]
+
 # --- Timeouts: total time allowed for ONE attempt, per provider ---
 # Gemini's free tier was measured at 1-22 s for tiny answers, so 10 s stops a slow call holding a client.
 GROQ_TIMEOUT_SECONDS: float = read_number("GROQ_TIMEOUT_SECONDS", "10")
