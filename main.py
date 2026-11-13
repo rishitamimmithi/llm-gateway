@@ -15,7 +15,7 @@ from pydantic import BaseModel
 load_dotenv()  # reads GROQ_API_KEY and MODEL from the .env file
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
-MODEL = os.getenv("MODEL", "llama-3.1-8b-instant")  # check the Groq console for current model names
+MODEL = os.getenv("MODEL", "openai/gpt-oss-20b")  # check the Groq console for current model names
 
 app = FastAPI(title="LLM Gateway")
 
