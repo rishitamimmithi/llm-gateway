@@ -86,7 +86,7 @@ class FakeProvider(Provider):
         return ProviderResponse(f"echo: {prompt}", self.name, self.model, prompt_tokens=4, completion_tokens=6)
 
 
-def test_chat_success_returns_answer_and_logs_it(client, monkeypatch):
+def test_chat_success_returns_answer_and_logs_it(client, monkeypatch, no_retry_wait):
     monkeypatch.setattr(main, "provider", FakeProvider())
 
     resp = client.post("/chat", json={"prompt": "hi"})
@@ -98,7 +98,52 @@ def test_chat_success_returns_answer_and_logs_it(client, monkeypatch):
     assert client.get("/stats").json()["successful_requests"] == 1
 
 
-def test_chat_provider_error_returns_502_and_logs_error(client, monkeypatch):
+class FlakyProvider(FakeProvider):
+    """Fails with a temporary error the first `failures` times, then answers."""
+
+    def __init__(self, failures: int) -> None:
+        super().__init__()
+        self.failures = failures
+        self.calls = 0
+
+    async def chat(self, prompt: str) -> ProviderResponse:
+        self.calls += 1
+        if self.calls <= self.failures:
+            raise ProviderError("fake", "HTTP 503: busy", retryable=True, status_code=503)
+        return await super().chat(prompt)
+
+
+@pytest.fixture
+def no_retry_wait(monkeypatch):
+    """Fixed retry settings, so tests are instant and don't depend on the developer's .env."""
+    monkeypatch.setattr(main.config, "MAX_ATTEMPTS", 3)
+    monkeypatch.setattr(main.config, "RETRY_BASE_DELAY_SECONDS", 0.0)
+
+
+def test_chat_retries_a_temporary_failure_and_succeeds(client, monkeypatch, no_retry_wait):
+    flaky = FlakyProvider(failures=1)
+    monkeypatch.setattr(main, "provider", flaky)
+
+    resp = client.post("/chat", json={"prompt": "hi"})
+
+    assert resp.status_code == 200
+    assert resp.json()["answer"] == "echo: hi"
+    assert flaky.calls == 2  # one failure + one successful retry
+    rows = main.request_log.db.execute("SELECT status FROM requests").fetchall()
+    assert rows == [("ok",)]  # the client got ONE answer, so ONE row: no "error" row for the retried failure
+
+
+def test_chat_gives_up_after_max_attempts(client, monkeypatch, no_retry_wait):
+    flaky = FlakyProvider(failures=99)
+    monkeypatch.setattr(main, "provider", flaky)
+
+    resp = client.post("/chat", json={"prompt": "hi"})
+
+    assert resp.status_code == 502
+    assert flaky.calls == 3
+
+
+def test_chat_provider_error_returns_502_and_logs_error(client, monkeypatch, no_retry_wait):
     error =ProviderError("fake", "HTTP 503: down", retryable=True, status_code=503)
     monkeypatch.setattr(main, "provider", FakeProvider(error))
 

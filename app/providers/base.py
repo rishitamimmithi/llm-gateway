@@ -5,6 +5,7 @@ The common "plug shape" every LLM provider must fit.
 - ProviderError: what a failed call raises, labelled retryable or not.
 - Provider: the abstract interface. Each provider (Groq, Gemini, Ollama) implements chat().
 """
+import asyncio
 import math
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
@@ -93,9 +94,11 @@ async def send_request(
     Returns the response only if it was a success (2xx); parsing the body is the provider's job.
     """
     try:
-        # Note: httpx applies this timeout to each phase (connect, read, ...), not the whole call.
-        resp = await client.post(url, json=json, headers=headers, timeout=timeout)
-    except httpx.TimeoutException as e:
+        # httpx's own timeout applies to each phase (connect, read, ...) separately, so a slowly
+        # trickling reply could run longer. asyncio.timeout adds a TOTAL deadline for the whole call.
+        async with asyncio.timeout(timeout):
+            resp = await client.post(url, json=json, headers=headers, timeout=timeout)
+    except (httpx.TimeoutException, TimeoutError) as e:
         raise ProviderError(provider, f"timed out after {timeout}s", retryable=True) from e
     except httpx.TransportError as e:  # could not connect, connection dropped, DNS failure...
         raise ProviderError(provider, f"network error: {type(e).__name__}", retryable=True) from e

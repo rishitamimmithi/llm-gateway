@@ -1,6 +1,9 @@
 """
 Tests for the shared provider helpers in app/providers/base.py.
 """
+import asyncio
+import time
+
 import httpx
 import pytest
 
@@ -62,6 +65,42 @@ def test_error_message_falls_back_to_raw_text(resp):
 
 
 # ---------- send_request ----------
+
+@pytest.mark.asyncio
+async def test_send_request_has_a_total_deadline():
+    # A server that keeps the call open longer than the timeout must be cut off, as a retryable timeout.
+    async def slow_server(request):
+        await asyncio.sleep(5)
+        return httpx.Response(200)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(slow_server)) as client:
+        start = time.perf_counter()
+        with pytest.raises(ProviderError) as exc:
+            await send_request("test", client, "https://example.com", json={}, headers={}, timeout=0.1, secret="k")
+        elapsed = time.perf_counter() - start
+
+    assert exc.value.retryable is True
+    assert "timed out" in str(exc.value)
+    assert elapsed < 1.0  # stopped at ~0.1 s, not after the server's 5 s
+
+
+@pytest.mark.asyncio
+async def test_outside_cancellation_is_not_mislabelled_as_a_timeout():
+    # Only OUR stopwatch should become "timed out". A cancel from outside (e.g. client hung up)
+    # must pass through as CancelledError, so it is never retried or logged as a provider failure.
+    async def slow_server(request):
+        await asyncio.sleep(5)
+        return httpx.Response(200)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(slow_server)) as client:
+        task = asyncio.create_task(
+            send_request("test", client, "https://example.com", json={}, headers={}, timeout=10, secret="k")
+        )
+        await asyncio.sleep(0.05)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
 
 @pytest.mark.asyncio
 async def test_send_request_with_unencodable_key_is_a_clean_error():
