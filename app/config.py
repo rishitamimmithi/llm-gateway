@@ -56,13 +56,13 @@ BREAKER_COOLDOWN_SECONDS: float = read_number("BREAKER_COOLDOWN_SECONDS", "30") 
 
 # --- Prices: USD per 1 million tokens (input, output), keyed by model name ---
 # These are the providers' list prices (free-tier calls cost us nothing, but this shows
-# what the traffic would cost on a paid plan). Check the pricing pages when changing models:
-# https://groq.com/pricing  and  https://ai.google.dev/gemini-api/docs/pricing
+# what the traffic would cost on a paid plan). Checked 2026-11-14 against:
+# https://console.groq.com/docs/models  and  https://aistudio.google.com/docs/pricing (standard, text)
+# Models with no published price are left out on purpose, so they show up as "unpriced".
 MODEL_PRICES: dict[str, tuple[float, float]] = {
     "openai/gpt-oss-20b": (0.075, 0.30),
     "openai/gpt-oss-120b": (0.15, 0.60),
-    "llama-3.1-8b-instant": (0.05, 0.08),
-    "gemini-3.1-flash-lite": (0.25, 1.50),
+    "gemini-3.1-flash-lite": (0.25, 1.50),  # output price includes thinking tokens
 }
 
 # --- Database ---
