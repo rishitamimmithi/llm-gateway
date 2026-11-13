@@ -54,5 +54,16 @@ RETRY_MAX_DELAY_SECONDS: float = read_number("RETRY_MAX_DELAY_SECONDS", "4")  # 
 BREAKER_FAILURE_THRESHOLD: int = read_number("BREAKER_FAILURE_THRESHOLD", "3", cast=int)  # failed requests in a row
 BREAKER_COOLDOWN_SECONDS: float = read_number("BREAKER_COOLDOWN_SECONDS", "30")  # skip time before one trial call
 
+# --- Prices: USD per 1 million tokens (input, output), keyed by model name ---
+# These are the providers' list prices (free-tier calls cost us nothing, but this shows
+# what the traffic would cost on a paid plan). Check the pricing pages when changing models:
+# https://groq.com/pricing  and  https://ai.google.dev/gemini-api/docs/pricing
+MODEL_PRICES: dict[str, tuple[float, float]] = {
+    "openai/gpt-oss-20b": (0.075, 0.30),
+    "openai/gpt-oss-120b": (0.15, 0.60),
+    "llama-3.1-8b-instant": (0.05, 0.08),
+    "gemini-3.1-flash-lite": (0.25, 1.50),
+}
+
 # --- Database ---
 DB_PATH: str = os.getenv("DB_PATH", "requests.db")

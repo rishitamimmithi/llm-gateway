@@ -14,17 +14,19 @@ Phase 2 — Multiple providers + fallback + circuit breaker
 - Phase 2 Step 4: retries with exponential backoff + jitter, per-provider timeouts, config checked at startup
 - Phase 2 Step 5: circuit breaker per provider
 - Phase 2 Step 6: router with fallback (Groq → Gemini), 503 when all fail, breaker per provider
+- Phase 2 Step 7: cost tracking — price table, `cost_usd` per request (column added to old databases), cost in `/chat` and `/stats` (total + per provider + unpriced count)
 
 ## In progress
 - Nothing
 
 ## Open bugs / questions
 - Gemini free tier is slow and unpredictable (1–22 s for tiny answers, one 30 s timeout)
+- Prices in `config.MODEL_PRICES` are not yet checked against the Groq / Gemini pricing pages
 - Failed attempts are logged with 0 tokens / $0, though a provider may bill a request that failed late
 - MAX_TOKENS (cut-off) answers count as success; revisit before caching in Phase 4
 
 ## Next steps
-1. Step 7: cost tracking
+1. Check the prices in `config.MODEL_PRICES` against the pricing pages
 2. Step 9: failover demo + verify Phase 2
 
 ## To learn later
@@ -38,6 +40,8 @@ Phase 2 — Multiple providers + fallback + circuit breaker
 - `app/core/circuit_breaker.py` — CLOSED / OPEN / HALF_OPEN; one trial at a time; generation number so late results are ignored; which errors count
 
 - `app/core/router.py` — try providers in order; breaker wraps retries; fallback
+- `app/core/cost.py` — tokens × price per 1M; input vs output price; unknown ≠ free
+- `app/db/logger.py` — adding a column to an existing SQLite table (simple migration); SUM / GROUP BY stats
 
 ## To rebuild myself later
 - `app/core/retry.py` — retry with exponential backoff and jitter
@@ -46,6 +50,7 @@ Phase 2 — Multiple providers + fallback + circuit breaker
 ## Improvement ideas
 - Log one row per attempt (attempt number, error type) instead of one per request
 - Return 504 for timeouts instead of 502
+- Compute cost once per request (now priced in both the log callback and `/chat`)
 
 ## Interview practice questions
 - (added each session)

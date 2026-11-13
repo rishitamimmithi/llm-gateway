@@ -37,7 +37,7 @@ def temporary(name: str) -> ProviderError:
 def make_router(*providers: Provider, threshold: int = 3) -> Router:
     routes = [Route(p, CircuitBreaker(p.name, failure_threshold=threshold, cooldown_seconds=30)) for p in providers]
     return Router(
-        routes, max_attempts=3, base_delay=0.0, max_delay=4.0, on_result=lambda *row: main.request_log.log(*row)
+        routes, max_attempts=3, base_delay=0.0, max_delay=4.0, on_result=lambda *row: main.record_result(*row)
     )
 
 
@@ -62,14 +62,51 @@ def test_health_returns_ok(client):
 
 
 def test_stats_empty_database(client):
-    assert client.get("/stats").json() == {"successful_requests": 0, "avg_latency_ms": 0, "total_tokens": 0}
+    assert client.get("/stats").json() == {
+        "successful_requests": 0,
+        "avg_latency_ms": 0,
+        "total_tokens": 0,
+        "total_cost_usd": 0,
+        "unpriced_requests": 0,
+        "by_provider": {},
+    }
 
 
 def test_stats_counts_only_successful_requests(client):
     main.request_log.log("groq", "m", 10, 20, 100.0, "ok")
     main.request_log.log("groq", "m", 5, 5, 300.0, "ok")
     main.request_log.log("groq", "m", 0, 0, 999.0, "error")  # must be ignored
-    assert client.get("/stats").json() == {"successful_requests": 2, "avg_latency_ms": 200.0, "total_tokens": 40}
+    body = client.get("/stats").json()
+    assert (body["successful_requests"], body["avg_latency_ms"], body["total_tokens"]) == (2, 200.0, 40)
+
+
+def test_stats_adds_up_cost_per_provider_and_counts_unpriced(client):
+    main.request_log.log("groq", "m", 10, 20, 100.0, "ok", 0.002)
+    main.request_log.log("groq", "m", 5, 5, 100.0, "ok", 0.001)
+    main.request_log.log("gemini", "g", 1, 1, 100.0, "ok", None)  # unknown price
+    main.request_log.log("gemini", "g", 0, 0, 100.0, "error", 0.0)  # failures never count
+    body = client.get("/stats").json()
+    assert body["total_cost_usd"] == 0.003
+    assert body["unpriced_requests"] == 1
+    assert body["by_provider"] == {
+        "gemini": {"successful_requests": 1, "total_tokens": 2, "total_cost_usd": 0, "unpriced_requests": 1},
+        "groq": {"successful_requests": 2, "total_tokens": 40, "total_cost_usd": 0.003, "unpriced_requests": 0},
+    }
+
+
+def test_chat_returns_and_logs_cost_from_the_price_table(client, monkeypatch):
+    # fake-model: 4 prompt tokens at $1/1M + 6 completion tokens at $2/1M = $0.000016
+    monkeypatch.setattr(main.config, "MODEL_PRICES", {"fake-model": (1.0, 2.0)})
+    body = client.post("/chat", json={"prompt": "hi"}).json()
+    assert body["cost_usd"] == pytest.approx(0.000016)
+    logged = main.request_log.db.execute("SELECT cost_usd FROM requests").fetchone()[0]
+    assert logged == pytest.approx(0.000016)
+
+
+def test_chat_cost_is_none_for_a_model_without_a_price(client, monkeypatch):
+    monkeypatch.setattr(main.config, "MODEL_PRICES", {})
+    assert client.post("/chat", json={"prompt": "hi"}).json()["cost_usd"] is None
+    assert client.get("/stats").json()["unpriced_requests"] == 1
 
 
 def test_chat_rejects_missing_prompt(client):

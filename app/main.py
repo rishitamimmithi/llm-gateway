@@ -11,8 +11,9 @@ from pydantic import BaseModel
 
 from app import config
 from app.core.circuit_breaker import CircuitBreaker
+from app.core.cost import estimate_cost
 from app.core.router import AllProvidersFailed, Route, Router
-from app.db.logger import RequestLog
+from app.db.logger import COST_DECIMALS, RequestLog
 from app.providers.base import Provider
 from app.providers.gemini import GeminiProvider
 from app.providers.groq import GroqProvider
@@ -21,6 +22,14 @@ logger = logging.getLogger("gateway")
 
 # One shared request log for the whole app (tests swap this for a temporary one)
 request_log = RequestLog(config.DB_PATH)
+
+
+def record_result(
+    provider: str, model: str, prompt_tokens: int, completion_tokens: int, latency_ms: float, status: str
+) -> None:
+    """Called by the router after each provider attempt: price it, then log it."""
+    cost = estimate_cost(model, prompt_tokens, completion_tokens, config.MODEL_PRICES)
+    request_log.log(provider, model, prompt_tokens, completion_tokens, latency_ms, status, cost)
 
 
 def _make_provider(name: str) -> tuple[Provider, str | None]:
@@ -52,7 +61,7 @@ def build_router() -> Router:
         max_attempts=config.MAX_ATTEMPTS,
         base_delay=config.RETRY_BASE_DELAY_SECONDS,
         max_delay=config.RETRY_MAX_DELAY_SECONDS,
-        on_result=lambda *row: request_log.log(*row),  # looked up at call time, so tests can swap the log
+        on_result=lambda *row: record_result(*row),  # looked up at call time, so tests can swap the log
     )
 
 
@@ -92,6 +101,7 @@ async def chat(req: ChatRequest) -> dict:
         raise HTTPException(status_code=503, detail=str(e))
 
     latency = (time.perf_counter() - start) * 1000
+    cost = estimate_cost(result.model, result.prompt_tokens, result.completion_tokens, config.MODEL_PRICES)
     return {
         "answer": result.text,
         "provider": result.provider,
@@ -102,6 +112,7 @@ async def chat(req: ChatRequest) -> dict:
             "completion_tokens": result.completion_tokens,
             "total_tokens": result.prompt_tokens + result.completion_tokens,
         },
+        "cost_usd": None if cost is None else round(cost, COST_DECIMALS),  # None = model has no price in config
     }
 
 
