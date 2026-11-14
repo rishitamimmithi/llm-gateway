@@ -90,6 +90,9 @@ SLIDING_WINDOW_SECONDS: float = read_number("SLIDING_WINDOW_SECONDS", "60")
 # Empty = limits kept in this process's memory. Set (e.g. redis://localhost:6379/0) to share limits across instances.
 REDIS_URL: str = os.getenv("REDIS_URL", "").strip()
 
+# --- Requests ---
+MAX_PROMPT_CHARS: int = read_number("MAX_PROMPT_CHARS", "32000", cast=int)  # longer prompts get HTTP 422
+
 # --- Caching (Redis is used for the exact cache too when REDIS_URL is set) ---
 EXACT_CACHE_ENABLED: bool = read_bool("EXACT_CACHE_ENABLED", "true")
 CACHE_TTL_SECONDS: float = read_number("CACHE_TTL_SECONDS", "3600")  # how long an answer may be reused
@@ -100,6 +103,8 @@ EMBEDDING_MODEL: str = os.getenv("EMBEDDING_MODEL", "sentence-transformers/all-M
 # Cosine similarity needed to reuse an answer. Higher = fewer wrong answers, fewer hits.
 # 0.94 from eval/results.md: ~60% of paraphrases hit, ~22% of tricky look-alike questions wrongly hit.
 SEMANTIC_CACHE_THRESHOLD: float = read_number("SEMANTIC_CACHE_THRESHOLD", "0.94")
+# Extra word checks before a semantic hit (same numbers, negation, to/from direction). See app/cache/guard.py.
+SEMANTIC_GUARD_ENABLED: bool = read_bool("SEMANTIC_GUARD_ENABLED", "true")
 if SEMANTIC_CACHE_THRESHOLD > 1:
     raise ValueError(f"SEMANTIC_CACHE_THRESHOLD must be at most 1, got {SEMANTIC_CACHE_THRESHOLD}")
 

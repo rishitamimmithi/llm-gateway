@@ -23,6 +23,8 @@ Phase 4 — Caching (built; 328 tests pass). Left for done: measure money saved 
 - Phase 4 Step 2: exact cache (memory LRU or Redis, fail open, 5 s skip after a Redis error); providers mark answers `complete` only on a normal stop, others are never cached
 - Phase 4 Step 3: `/chat` checks exact → semantic → providers; hits logged as `cache_exact` / `cache_semantic` with `saved_usd`; `/stats` has a `cache` section (hits, misses, hit rate, money saved)
 - Phase 4 Step 4: semantic cache (`all-MiniLM-L6-v2`, numpy matrix, cosine threshold 0.94, off by default, one embedding at a time)
+- Phase 4 Step 6: semantic guard (`app/cache/guard.py`): numbers, negation, to/from direction must match. False hits at 0.94: 22% → 3% (hold-out: 40% → 7%), hit rate unchanged
+- Guard review fixes: linear-time checks, features stored per entry, prompt length cap (422), digits inside words (gpt4), apostrophe-less negation (isnt), "how to" not treated as a direction; eval numbers unchanged
 - Phase 4 Step 5: false-hit test set (123 pairs: 50 same, 73 look-alike) + `python -m eval.false_hit_eval`; results in `eval/results.md` and README. At 0.90: 78% hits / 33% false hits; at 0.94: 60% / 22%. Direction swaps ("5 miles to km" vs "5 km to miles") score 0.99+, so a threshold alone can't stop them
 
 ## In progress
@@ -35,15 +37,16 @@ Phase 4 — Caching (built; 328 tests pass). Left for done: measure money saved 
 - Rate-limited (429) requests are not logged to the database yet
 - Ollama provider from the Phase 2 list is not built yet (not needed for the done criteria)
 - Failed attempts are logged with 0 tokens / $0, though a provider may bill a request that failed late
-- Semantic cache gives wrong answers for swapped-direction / negated / changed-number questions (seen live: "Convert 10 INR to USD" got the USD→INR answer at 0.957)
+- Guard still lets through antonyms ("healthy"/"unhealthy", "most"/"least"), swapped numbers ("12 divided by 4" vs "4 divided by 12") and similar names (Slovakia/Slovenia)
+- Guard treats "last" as a number word, so "undo my last commit" vs "revert the most recent commit" is blocked (found on the hold-out set; not fixed yet so the hold-out numbers stay honest)
 - `/stats` hit rate counts every old `ok` row as a miss, so use a fresh `requests.db` when measuring
 - Caches are shared across client keys (fine while all clients are mine)
 - `matplotlib` not installed, so `eval/tradeoff.png` isn't drawn yet
 
 ## Next steps
-1. Add a "guard" before semantic hits: no hit if the two prompts have different numbers, negation words, or the same words in a different order around "to/from"; re-run the eval and compare false hits
-2. Measure money saved: replay a realistic prompt mix (with repeats) through the gateway with a fresh `requests.db`, record hit rate and `saved_usd` in the README (Phase 4 done criteria)
-3. Phase 5: request deduplication (in-flight futures map), then consistent hashing
+1. Measure money saved: replay a realistic prompt mix (with repeats) through the gateway with a fresh `requests.db`, record hit rate and `saved_usd` in the README (Phase 4 done criteria)
+2. Phase 5: request deduplication (in-flight futures map), then consistent hashing
+3. Optional: remove "last" from the guard's number words, then write a fresh hold-out set before re-measuring
 
 ## To learn later
 - `app/config.py` — settings in one place; checking numbers at startup
@@ -68,6 +71,7 @@ Phase 4 — Caching (built; 328 tests pass). Left for done: measure money saved 
 - `app/cache/semantic.py` — embeddings; cosine similarity = dot product of unit vectors; threshold; one matrix multiply per lookup
 - `eval/false_hit_eval.py` — hit rate vs false-hit rate vs threshold; why embeddings miss word order and negation
 - `app/providers/*` — finish reasons; only cache complete answers
+- `app/cache/guard.py` — why embeddings ignore word order; cheap rule checks; next-best match; hold-out set to avoid fitting rules to the test
 
 ## To rebuild myself later
 - `app/core/retry.py` — retry with exponential backoff and jitter
@@ -80,7 +84,7 @@ Phase 4 — Caching (built; 328 tests pass). Left for done: measure money saved 
 - Log one row per attempt (attempt number, error type) instead of one per request
 - Return 504 for timeouts instead of 502
 - Compute cost once per request (now priced in both the log callback and `/chat`)
-- Semantic guard or a small cross-encoder re-check for hits close to the threshold, to cut false hits without losing paraphrase hits
+- Small cross-encoder re-check for semantic hits, to catch antonyms the guard misses
 
 ## Interview practice questions
 - Token bucket with capacity 10, refill 0.2/s: a client sends 15 requests at once. How many pass, and when can it send the next?
@@ -91,6 +95,7 @@ Phase 4 — Caching (built; 328 tests pass). Left for done: measure money saved 
 - Why does an LRU cache need a doubly linked list and not just a dict? What does each one give you?
 - Your semantic cache returned the USD→INR answer for "convert 10 INR to USD". Why does that happen, and how would you stop it?
 - Why is a cut-off (MAX_TOKENS) answer returned to the client but not cached?
+- Why did you test the guard on a hold-out set, and what would it mean if hold-out results were much worse?
 - Why store an unknown price as NULL instead of 0?
 
 ## Session log
@@ -100,3 +105,4 @@ Phase 4 — Caching (built; 328 tests pass). Left for done: measure money saved 
 | 2026-11-14 | Phase 2 Steps 5–9: circuit breaker, router with fallback, cost tracking, failover demo; Phase 2 done |
 | 2026-11-14 | Phase 3: API keys, token bucket, sliding window, Redis (Lua) versions, 429 + Retry-After |
 | 2026-11-14 | Phase 4: LRU + TTL, exact cache (memory / Redis), semantic cache, false-hit eval (123 pairs) |
+| 2026-11-14 | Semantic guard (numbers, negation, direction); false hits 22% → 3% at 0.94; 30-pair hold-out set |

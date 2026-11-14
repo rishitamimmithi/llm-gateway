@@ -1,0 +1,30 @@
+{"a": "How do I delete a folder in Linux?", "b": "What's the command to remove a directory on Linux?", "same": true, "category": "paraphrase"}
+{"a": "What is the main function of the liver?", "b": "What does the liver mainly do?", "same": true, "category": "paraphrase"}
+{"a": "Who discovered penicillin?", "b": "Who was the discoverer of penicillin?", "same": true, "category": "paraphrase"}
+{"a": "How do I merge two dictionaries in Python?", "b": "What's the way to combine two Python dicts?", "same": true, "category": "paraphrase"}
+{"a": "Why do leaves change colour in autumn?", "b": "What makes leaves turn colour in the fall?", "same": true, "category": "paraphrase"}
+{"a": "What is a hash table?", "b": "Explain what a hash table is.", "same": true, "category": "paraphrase"}
+{"a": "How do I undo my last git commit?", "b": "How can I revert the most recent commit in git?", "same": true, "category": "paraphrase"}
+{"a": "What is the capital of Canada?", "b": "Which city is Canada's capital?", "same": true, "category": "paraphrase"}
+{"a": "Give me two examples of renewable energy.", "b": "Name 2 renewable energy sources.", "same": true, "category": "paraphrase"}
+{"a": "What does CPU stand for?", "b": "what is the full form of cpu", "same": true, "category": "formatting"}
+{"a": "How do I go from Paris to Lyon by train?", "b": "By train, how do I get from Paris to Lyon?", "same": true, "category": "word_order"}
+{"a": "Is it safe to eat raw eggs?", "b": "Are raw eggs safe to eat?", "same": true, "category": "word_order"}
+{"a": "In C++, what is a pointer?", "b": "What is a pointer in C++?", "same": true, "category": "word_order"}
+{"a": "Why don't penguins fly?", "b": "Why can't penguins fly?", "same": true, "category": "paraphrase"}
+{"a": "How far is the Moon from Earth?", "b": "What is the distance between the Earth and the Moon?", "same": true, "category": "paraphrase"}
+{"a": "Convert 20 kg to pounds", "b": "Convert 20 pounds to kg", "same": false, "category": "direction_swap"}
+{"a": "How do I send money from PayPal to my bank?", "b": "How do I send money from my bank to PayPal?", "same": false, "category": "direction_swap"}
+{"a": "Is a cat smarter than a dog?", "b": "Is a dog smarter than a cat?", "same": false, "category": "direction_swap"}
+{"a": "Translate 'good morning' from German into Italian", "b": "Translate 'good morning' from Italian into German", "same": false, "category": "direction_swap"}
+{"a": "What is 12 divided by 4?", "b": "What is 4 divided by 12?", "same": false, "category": "direction_swap"}
+{"a": "What is 25% of 80?", "b": "What is 25% of 60?", "same": false, "category": "number_change"}
+{"a": "Write a five-line poem about rain.", "b": "Write a ten-line poem about rain.", "same": false, "category": "number_change"}
+{"a": "Who won the Champions League in 2019?", "b": "Who won the Champions League in 2021?", "same": false, "category": "number_change"}
+{"a": "What should I pack for a hiking trip?", "b": "What should I not pack for a hiking trip?", "same": false, "category": "negation"}
+{"a": "Which vitamins dissolve in water?", "b": "Which vitamins don't dissolve in water?", "same": false, "category": "negation"}
+{"a": "Is coffee healthy?", "b": "Is coffee unhealthy?", "same": false, "category": "negation"}
+{"a": "What is the most populated country?", "b": "What is the least populated country?", "same": false, "category": "comparison_or_superlative"}
+{"a": "What is the capital of Slovakia?", "b": "What is the capital of Slovenia?", "same": false, "category": "entity_swap"}
+{"a": "How do I sort an array in Java?", "b": "How do I sort an array in Go?", "same": false, "category": "entity_swap"}
+{"a": "Explain how to start a small business.", "b": "Explain how to close a small business.", "same": false, "category": "task_change"}

@@ -42,7 +42,7 @@ def make(threshold=0.9, max_entries=10, ttl=60, clock=None) -> SemanticCache:
 
 
 async def store(cache: SemanticCache, prompt: str, text: str) -> None:
-    cache.add(await cache.embed(prompt), answer(text))
+    cache.add(await cache.embed(prompt), answer(text), prompt)
 
 
 @pytest.mark.asyncio

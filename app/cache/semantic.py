@@ -12,7 +12,9 @@ A linear scan is fine for a few thousand entries (1000 x 384 floats is ~1.5 MB a
 matrix multiply); a vector index (FAISS, HNSW) would be the next step for millions.
 
 The risk: two prompts can look alike but ask different things ("10 USD to INR" vs
-"10 INR to USD"). That's the "false hit" rate measured in eval/.
+"10 INR to USD"). That's the "false hit" rate measured in eval/. With the guard on, every
+match above the threshold must also pass app/cache/guard.py (same numbers, negation, direction);
+if the best match fails, the next best is tried.
 """
 import asyncio
 import logging
@@ -25,6 +27,7 @@ import numpy as np
 
 from app.cache.answer import CachedAnswer
 from app.cache.exact import normalise_prompt
+from app.cache.guard import Features, features, features_conflict
 
 logger = logging.getLogger("gateway.cache")
 
@@ -71,6 +74,7 @@ class SemanticCache:
         threshold: float,
         max_entries: int,
         ttl_seconds: float,
+        guard: bool = True,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         if not 0 < threshold <= 1:
@@ -84,6 +88,9 @@ class SemanticCache:
         self._vectors = np.zeros((max_entries, embedder.dimension), dtype=np.float32)
         self._expires_at = np.full(max_entries, -np.inf)  # -inf = empty slot, never matches
         self._answers: list[CachedAnswer | None] = [None] * max_entries
+        self._features: list[Features | None] = [None] * max_entries  # guard checks, computed once per entry
+        self.guard = guard
+        self.guard_blocks = 0  # matches above the threshold that the guard turned down
         # One embedding at a time: the tokenizer isn't safe to share between threads,
         # and parallel torch calls would just fight over the same CPU cores.
         self._embed_lock = asyncio.Lock()
@@ -94,22 +101,28 @@ class SemanticCache:
             vectors = await asyncio.to_thread(self.embedder.embed, [normalise_prompt(prompt)])
         return unit_vectors(vectors)[0]
 
-    def lookup(self, vector: np.ndarray) -> SemanticHit | None:
+    def lookup(self, vector: np.ndarray, prompt: str | None = None) -> SemanticHit | None:
+        """Best live match at or above the threshold that the guard accepts.
+        prompt=None skips the guard (only tests that check the similarity maths do that)."""
         scores = self._vectors @ vector  # cosine similarity with every slot at once
         scores[self._expires_at <= self._clock()] = -np.inf  # skip empty and expired slots
-        best = int(np.argmax(scores))
-        similarity = float(scores[best])
-        if similarity < self.threshold:
-            return None
-        return SemanticHit(self._answers[best], similarity)  # type: ignore[arg-type]
+        candidates = np.flatnonzero(scores >= self.threshold)
+        query = features(prompt) if self.guard and prompt is not None and len(candidates) else None
+        for slot in candidates[np.argsort(-scores[candidates])]:  # best first
+            if query is not None and features_conflict(self._features[slot], query):  # type: ignore[arg-type]
+                self.guard_blocks += 1
+                continue
+            return SemanticHit(self._answers[slot], float(scores[slot]))  # type: ignore[arg-type]
+        return None
 
-    def add(self, vector: np.ndarray, answer: CachedAnswer) -> None:
+    def add(self, vector: np.ndarray, answer: CachedAnswer, prompt: str) -> None:
         # The slot that expires first: an empty or expired one if there is one, else the oldest
         # entry (every entry gets the same TTL, so "expires first" = "added first").
         slot = int(np.argmin(self._expires_at))
         self._vectors[slot] = vector
         self._expires_at[slot] = self._clock() + self.ttl_seconds
         self._answers[slot] = answer
+        self._features[slot] = features(prompt)
 
     def __len__(self) -> int:
         """Live (stored and not expired) entries."""

@@ -173,3 +173,11 @@ def test_unpriced_hit_counts_in_stats(setup, monkeypatch):
     assert hit["cache"] == "exact" and hit["saved_usd"] is None
     cache = client.get("/stats").json()["cache"]
     assert cache["exact_hits"] == 1 and cache["unpriced_hits"] == 1 and cache["saved_usd"] == 0
+
+
+def test_too_long_prompt_is_rejected(setup):
+    provider = FakeProvider()
+    client = setup(provider)
+    response = client.post("/chat", json={"prompt": "x" * (main.config.MAX_PROMPT_CHARS + 1)})
+    assert response.status_code == 422
+    assert provider.calls == 0

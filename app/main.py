@@ -10,7 +10,7 @@ import time
 from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Response
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from redis.asyncio import Redis
 from redis.asyncio.retry import Retry
 from redis.backoff import NoBackoff
@@ -115,6 +115,7 @@ def build_semantic_cache() -> SemanticCache | None:
         threshold=config.SEMANTIC_CACHE_THRESHOLD,
         max_entries=config.CACHE_MAX_ENTRIES,
         ttl_seconds=config.CACHE_TTL_SECONDS,
+        guard=config.SEMANTIC_GUARD_ENABLED,
     )
 
 
@@ -145,7 +146,8 @@ app = FastAPI(title="LLM Gateway", lifespan=lifespan)
 
 
 class ChatRequest(BaseModel):
-    prompt: str
+    # Length cap: a huge prompt would be slow to embed and check, and costly to send on (422 if over)
+    prompt: str = Field(max_length=config.MAX_PROMPT_CHARS)
 
 
 @app.get("/health")
@@ -217,7 +219,7 @@ async def chat(req: ChatRequest, client_id: str = Depends(rate_limited_client)) 
 
     vector = await semantic_vector(req.prompt)
     if vector is not None:
-        hit: SemanticHit | None = semantic_cache.lookup(vector)
+        hit: SemanticHit | None = semantic_cache.lookup(vector, req.prompt)
         if hit is not None:
             return cache_hit_response("semantic", hit.answer, start, hit.similarity)
 
@@ -234,7 +236,7 @@ async def chat(req: ChatRequest, client_id: str = Depends(rate_limited_client)) 
         if exact_cache is not None:
             await exact_cache.set(req.prompt, answer)
         if vector is not None:
-            semantic_cache.add(vector, answer)
+            semantic_cache.add(vector, answer, req.prompt)
 
     return {
         "answer": result.text,
