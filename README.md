@@ -80,6 +80,7 @@ All settings (timeouts, retries, breaker, limits, cache sizes, threshold) are en
 | `POST /chat` | `{"prompt": "..."}` → answer, provider, tokens, `cost_usd`, latency; cache hits say `"cache": "exact"/"semantic"` and `saved_usd` |
 | `POST /chat/stream` | same body; the answer arrives as Server-Sent Events while it's written: `chunk` `{text}` events, then `done` (provider, tokens, cost, cache, latency) or `error` if the provider breaks mid-answer. Same auth, rate limit and caches; 503 if every provider fails before the first piece |
 | `GET /stats` | totals per provider, cost, cache hits / misses / hit rate / money saved, deduplicated requests |
+| `GET /stats/recent?limit=50` | newest requests first: time, prompt preview, how it was served (provider / exact cache / semantic cache / dedup / error / cancelled), latency, cost |
 | `GET /stats/timeseries?minutes=60&bucket=60` | per-bucket requests, cache hits, failures, p50/p95 latency, spent and saved |
 | `GET /health`, `GET /health/providers` | liveness; circuit breaker state per provider |
 
@@ -199,9 +200,21 @@ Virtual nodes even out the load: with 4 nodes the busiest one holds 41% of keys 
 28.7% with 100 and 26.0% with 500 (ideal 25%).
 
 ## Dashboard
-React (Vite + recharts) app in `dashboard/`, refreshing every 5 s: requests over time (provider answer / cache hit /
-shared / failed), provider latency p50 and p95, money spent vs saved, and each provider's circuit breaker state.
-Time ranges: 15 min, 1 hour, 6 hours, 24 hours. With Docker it's at http://localhost:8080; without:
+![Dashboard: KPI cards, requests, provider latency and cost charts](docs/dashboard.png)
+
+React (Vite + recharts) app in `dashboard/`, refreshing every 5 s. Dark by default with a light toggle.
+- Header: gateway health (all circuits closed = healthy, any open / half-open = degraded) and the time range
+  (15 min, 1 hour, 6 hours, 24 hours)
+- KPI cards: requests, error rate, cache hit rate, p50 / p95 latency, spent, saved, each with the change vs the
+  previous period and a small trend line
+- Charts: requests over time (provider answer / cache hit / shared / failed), provider latency p50 and p95, money
+  spent vs saved
+- Recent requests (`GET /stats/recent`): time, prompt preview, served by (provider / exact cache / semantic cache /
+  dedup), latency, cost. The log keeps only the first `PROMPT_PREVIEW_CHARS` characters of each prompt
+  (default 60; shorter prompts are kept whole). Set `PROMPT_PREVIEW_CHARS=0` to store no prompt text at all
+- Each provider's circuit breaker state
+
+With Docker it's at http://localhost:8080; without:
 
 1. Start the gateway (`uvicorn app.main:app`, port 8000)
 2. `cd dashboard`, `npm install`, `npm run dev`, open http://localhost:5173
@@ -227,7 +240,7 @@ NOTES.md            design decisions: what I chose, the alternatives, and why
 ## Limits I know about
 - Dedup is per gateway instance; two instances can each make one call for the same prompt.
 - Streams (`/chat/stream`) skip dedup, and Gemini's stream is the whole answer in one piece (no real streaming yet).
-- `/stats`, `/stats/timeseries` and `/health` need no API key yet; lock them down before deploying publicly.
+- `/stats`, `/stats/timeseries`, `/stats/recent` and `/health` need no API key yet; lock them down before deploying publicly. `/stats/recent` shows the first 60 characters of each prompt (`PROMPT_PREVIEW_CHARS=0` turns that off).
 - The cache is shared across all client keys (fine while all clients are mine).
 - The guard misses antonyms and swapped numbers; a small cross-encoder re-check would be the next step.
 - SQLite and one uvicorn worker are fine for a laptop; PostgreSQL and several workers behind a load balancer are the next step for more traffic.

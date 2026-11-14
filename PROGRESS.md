@@ -3,7 +3,7 @@
 Updated at the end of every work session.
 
 ## Current phase
-Phase 7 — prove it (plan approved: fake provider + Locust, Docker, CI, README). Phases 1–6 done.
+All 7 phases done. Now: stretch ideas (streaming done; next candidates: cost-aware routing, OpenTelemetry tracing, multi-tenant quotas).
 
 ## Done
 - Phase 1 complete: proxy runs, requests logged, `/stats` matches the database, pushed with `.env` excluded
@@ -43,16 +43,18 @@ Phase 7 — prove it (plan approved: fake provider + Locust, Docker, CI, README)
 - Stretch: streaming (SSE) `POST /chat/stream`: `chunk` / `done` / `error` events; Groq streams for real, Gemini sends one piece, fake streams word by word; fallback only before the first piece; cache hits streamed; complete answers cached; client disconnect logged as `cancelled`. Checked live with the fake provider
 - Streaming review fixes: breaker verdict waits for the end of the stream (a provider that dies mid-answer every time now opens its breaker; breaker got `acquire()` / `report()`), Groq error pieces and streams cut before `[DONE]` raise instead of being cached, stream always closed on disconnect (`ClosingStreamingResponse`, shielded clean-up), bugs logged as `error` not `cancelled`. 440 tests pass
 
+- Dashboard redesign (ops-tool style: dark default + light toggle, one accent, KPI cards with change vs previous period and sparklines, health pill, recent-requests table); `GET /stats/recent` + `prompt_preview` column (`PROMPT_PREVIEW_CHARS`, default 60, 0 = off). KPI cards wrap evenly (2 / 4 / 7 per row)
+- Fix: the dashboard's parallel stats calls broke the shared SQLite connection (HTTP 500, "bad parameter or other API misuse"); every query now goes through a lock (`LockedConnection` in `app/db/logger.py`) + thread test. 445 tests pass; 100/100 parallel calls OK in Docker
+- Phase 7 Step 5: README with results summary, Mermaid architecture diagram, Docker quick start, endpoints, load-test table, dashboard screenshot (`docs/dashboard.png`), known limits
+- Phase 7 verified: Locust table (req/s, p50/p95/p99, errors, with and without cache) in `loadtest/results.md` + README; `docker compose up` (gateway + Redis + dashboard) runs on this laptop; GitHub Actions green on the last 3 pushes (pytest, dashboard build, compose build); 445 tests pass, dashboard builds; resume bullet filled with measured numbers. Phase 7 done
+
 ## In progress
-- Docker files not run yet: Docker isn't installed on this laptop (CI's `docker compose build` job will be the first check)
-- Phase 7 Step 5 written: README with results summary, Mermaid architecture diagram, Docker quick start, endpoints, load-test table, failover / rate limiting sections, known limits. Still missing: a dashboard screenshot
-- Phase 7 not verified yet: needs a green CI run and `docker compose up` checked by hand
+- Nothing
 
 ## Open bugs / questions
 - Gemini free tier is slow and unpredictable (1–22 s for tiny answers, one 30 s timeout)
 - Fallback through slow Gemini took 7–24 s per request in the demo (timeouts are retried up to 3 × 10 s)
 - `/stats`, `/stats/timeseries` and `/health` need no API key yet (fine locally; lock down before deploying)
-- One SQLite connection is shared by the event loop (logging) and threadpool handlers (stats); no errors in Locust runs, but nothing polled `/stats` during them; a separate read connection would be safer
 - Under the semantic load test, exact-cache hits slow down too (p50 360 ms): the embedding model uses the same CPU cores as the event loop
 - Semantic hits aren't copied into the exact cache, so a repeated paraphrase is embedded every time
 - The embedding queue has no size limit: under overload, waiting time grows without bound
@@ -74,10 +76,9 @@ Phase 7 — prove it (plan approved: fake provider + Locust, Docker, CI, README)
 - `matplotlib` not installed, so `eval/tradeoff.png` isn't drawn yet
 
 ## Next steps
-1. Push and check the GitHub Actions run is green (first real test of the Docker build)
-2. Install Docker Desktop, run `docker compose up --build`, check `/chat` on :8000 and the dashboard on :8080
-3. Add a dashboard screenshot to the README (`docs/dashboard.png`), then run the Phase 7 verify pass
-4. Optional: remove "last" from the guard's number words, then write a fresh hold-out set before re-measuring
+1. Try `/chat/stream` against real Groq and record time-to-first-token
+2. Real Gemini streaming (`streamGenerateContent`)
+3. Optional: remove "last" from the guard's number words, then write a fresh hold-out set before re-measuring
 
 ## To learn later
 - `app/config.py` — settings in one place; checking numbers at startup
@@ -117,6 +118,7 @@ Phase 7 — prove it (plan approved: fake provider + Locust, Docker, CI, README)
 - `app/cache/semantic.py` `embed` — micro-batching with futures; one worker task; cancelling safely at shutdown
 - `Dockerfile` / `docker-compose.yml` — image layers and caching; build args; healthchecks; service names as hostnames; volumes
 - `.github/workflows/tests.yml` — CI jobs; caching pip/npm; keeping heavy deps out of CI
+- `app/db/logger.py` `LockedConnection` — why one SQLite connection can't be used by two threads at once; lock + read all rows inside it
 - `app/core/router.py` `stream` / `app/main.py` `/chat/stream` — SSE format; why fallback stops after the first piece; async generator clean-up on disconnect
 
 ## To rebuild myself later
@@ -181,3 +183,4 @@ Phase 7 — prove it (plan approved: fake provider + Locust, Docker, CI, README)
 | 2026-11-14 | Phase 7 Steps 1–4: fake provider, Locust (523 / 779 / 378 req/s), WAL + embedding batching fixes, Docker + compose, CI |
 | 2026-11-14 | Phase 7 Step 5: final README (diagram, Docker quick start, results, resume bullet numbers) |
 | 2026-11-14 | Stretch: streaming responses (SSE) via `POST /chat/stream`, review fixes (breaker, Groq stream errors, disconnect clean-up) |
+| 2026-11-14 | Dashboard redesign + `/stats/recent`, SQLite thread-safety fix, README screenshot; Phase 7 verified and done |

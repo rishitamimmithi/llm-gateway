@@ -4,6 +4,7 @@ Wrapped in a class so tests can create a throwaway database instead of using req
 """
 import math
 import sqlite3
+import threading
 import time
 
 # One small request costs about $0.000001, so fewer decimals would round real costs to 0
@@ -19,10 +20,44 @@ def percentile(sorted_values: list[float], pct: float) -> float | None:
     return round(sorted_values[rank - 1], 1)
 
 
+class _Rows(list):
+    """Query results already read into memory, with the two cursor methods the code uses."""
+
+    def fetchone(self):
+        return self[0] if self else None
+
+    def fetchall(self) -> list:
+        return list(self)
+
+
+class LockedConnection:
+    """One SQLite connection shared by the event loop (logging) and FastAPI's thread pool (stats
+    endpoints). check_same_thread=False only turns off Python's check: two threads using the
+    connection at the same moment still fails ("bad parameter or other API misuse"), which the
+    dashboard's parallel stats calls triggered. So every call takes a lock and reads all of its rows
+    before letting go. Trade-off: a log write can wait for a running stats query (a few ms)."""
+
+    def __init__(self, conn: sqlite3.Connection) -> None:
+        self._conn = conn
+        self._lock = threading.Lock()
+
+    def execute(self, sql: str, params: tuple = ()) -> _Rows:
+        with self._lock:
+            return _Rows(self._conn.execute(sql, params).fetchall())
+
+    def commit(self) -> None:
+        with self._lock:
+            self._conn.commit()
+
+    def close(self) -> None:
+        with self._lock:
+            self._conn.close()
+
+
 class RequestLog:
     def __init__(self, db_path: str) -> None:
-        # check_same_thread=False: FastAPI may use this connection from different threads
-        self.db = sqlite3.connect(db_path, check_same_thread=False)
+        # check_same_thread=False: FastAPI uses this connection from different threads (see LockedConnection)
+        self.db = LockedConnection(sqlite3.connect(db_path, check_same_thread=False))
         # Every request commits a row from the event loop. In the default journal mode each commit waits
         # for the disk (~10 ms on my laptop), which capped the gateway near 64 req/s under load.
         # WAL appends to a log file instead (~0.1 ms). (It would also let a second, read-only connection
@@ -45,6 +80,9 @@ class RequestLog:
         # Cache hits store what the provider call WOULD have cost in saved_usd (NULL for other rows).
         if "saved_usd" not in columns:
             self.db.execute("ALTER TABLE requests ADD COLUMN saved_usd REAL")
+        # A short start of the prompt for the "recent requests" table (NULL when previews are off)
+        if "prompt_preview" not in columns:
+            self.db.execute("ALTER TABLE requests ADD COLUMN prompt_preview TEXT")
         # The dashboard asks for "rows in the last N minutes" every few seconds: without an index on ts
         # that is a full table scan each time
         self.db.execute("CREATE INDEX IF NOT EXISTS idx_requests_ts ON requests(ts)")
@@ -59,32 +97,50 @@ class RequestLog:
         latency_ms: float,
         status: str,
         cost_usd: float | None = None,
+        prompt_preview: str | None = None,
     ) -> None:
         """cost_usd=None means "unknown price", which is kept apart from a real 0."""
         self.db.execute(
-            "INSERT INTO requests (ts, provider, model, prompt_tokens, completion_tokens, latency_ms, status, cost_usd) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (time.time(), provider, model, prompt_tokens, completion_tokens, latency_ms, status, cost_usd),
+            "INSERT INTO requests (ts, provider, model, prompt_tokens, completion_tokens, latency_ms, status, "
+            "cost_usd, prompt_preview) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (time.time(), provider, model, prompt_tokens, completion_tokens, latency_ms, status, cost_usd, prompt_preview),
         )
         self.db.commit()
 
     def log_cache_hit(
-        self, kind: str, provider: str, model: str, latency_ms: float, saved_usd: float | None
+        self, kind: str, provider: str, model: str, latency_ms: float, saved_usd: float | None,
+        prompt_preview: str | None = None,
     ) -> None:
         """A request answered from the cache: no tokens, no cost, status cache_exact / cache_semantic."""
-        self._log_saved(f"cache_{kind}", provider, model, latency_ms, saved_usd)
+        self._log_saved(f"cache_{kind}", provider, model, latency_ms, saved_usd, prompt_preview)
 
-    def log_deduplicated(self, provider: str, model: str, latency_ms: float, saved_usd: float | None) -> None:
+    def log_deduplicated(
+        self, provider: str, model: str, latency_ms: float, saved_usd: float | None, prompt_preview: str | None = None
+    ) -> None:
         """A request that shared another identical in-flight request's provider call (status dedup)."""
-        self._log_saved("dedup", provider, model, latency_ms, saved_usd)
+        self._log_saved("dedup", provider, model, latency_ms, saved_usd, prompt_preview)
 
-    def _log_saved(self, status: str, provider: str, model: str, latency_ms: float, saved_usd: float | None) -> None:
+    def _log_saved(
+        self, status: str, provider: str, model: str, latency_ms: float, saved_usd: float | None,
+        prompt_preview: str | None,
+    ) -> None:
         self.db.execute(
             "INSERT INTO requests (ts, provider, model, prompt_tokens, completion_tokens, latency_ms, status, "
-            "cost_usd, saved_usd) VALUES (?, ?, ?, 0, 0, ?, ?, 0, ?)",
-            (time.time(), provider, model, latency_ms, status, saved_usd),
+            "cost_usd, saved_usd, prompt_preview) VALUES (?, ?, ?, 0, 0, ?, ?, 0, ?, ?)",
+            (time.time(), provider, model, latency_ms, status, saved_usd, prompt_preview),
         )
         self.db.commit()
+
+    def recent(self, limit: int) -> list[dict]:
+        """The newest `limit` rows, newest first, for the dashboard's "recent requests" table."""
+        rows = self.db.execute(
+            "SELECT id, ts, status, provider, model, prompt_preview, latency_ms, prompt_tokens, completion_tokens, "
+            "cost_usd, saved_usd FROM requests ORDER BY id DESC LIMIT ?",
+            (limit,),
+        )
+        names = ("id", "ts", "status", "provider", "model", "prompt_preview", "latency_ms", "prompt_tokens",
+                 "completion_tokens", "cost_usd", "saved_usd")
+        return [dict(zip(names, row)) for row in rows]
 
     def cache_stats(self) -> dict:
         """Misses = requests a provider answered (status ok); hits = requests the cache answered.

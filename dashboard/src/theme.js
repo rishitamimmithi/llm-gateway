@@ -1,34 +1,73 @@
-import { useEffect, useState } from "react";
+import { useSyncExternalStore } from "react";
 
-// Chart colours for light and dark mode. SVG chart marks get plain colour values,
-// so the palette lives here; the page itself uses the CSS variables in styles.css.
-const LIGHT = {
-  surface: "#fcfcfb",
-  grid: "#e1e0d9",
-  axis: "#c3c2b7",
-  muted: "#898781",
-  ink: "#0b0b0b",
-  series: ["#2a78d6", "#eb6834", "#1baf7a", "#eda100"],
+// Two jobs: the dark/light choice (saved in localStorage) and the chart colours.
+// SVG chart marks get plain colour values, so the chart palette lives here;
+// the rest of the page uses the CSS variables in styles.css.
+const STORAGE_KEY = "gateway-dashboard-theme";
+
+function readStored() {
+  try {
+    const value = localStorage.getItem(STORAGE_KEY);
+    if (value === "light" || value === "dark") return value;
+  } catch {
+    // storage blocked or unavailable: fall through to the default
+  }
+  return "dark";
+}
+
+let mode = readStored();
+const listeners = new Set();
+
+function apply() {
+  document.documentElement.dataset.theme = mode;
+}
+apply();
+
+export function toggleTheme() {
+  mode = mode === "dark" ? "light" : "dark";
+  apply();
+  try {
+    localStorage.setItem(STORAGE_KEY, mode);
+  } catch {
+    // not saved, the choice still holds for this visit
+  }
+  listeners.forEach((listener) => listener());
+}
+
+function subscribe(listener) {
+  listeners.add(listener);
+  return () => listeners.delete(listener);
+}
+
+export function useThemeMode() {
+  return useSyncExternalStore(subscribe, () => mode);
+}
+
+const PALETTES = {
+  light: {
+    surface: "#ffffff",
+    grid: "#e6e8eb",
+    axis: "#c9cdd2",
+    muted: "#5f6872",
+    ink: "#14181c",
+    accent: "#0b7a9b",
+    neutral: "#8a939c",
+    neutralSoft: "#c2c8ce",
+    critical: "#c9453e",
+  },
+  dark: {
+    surface: "#14171b",
+    grid: "#232830",
+    axis: "#343b44",
+    muted: "#8d96a0",
+    ink: "#e6e8eb",
+    accent: "#3aa6c8",
+    neutral: "#7d8791",
+    neutralSoft: "#4a525b",
+    critical: "#e5675f",
+  },
 };
-
-const DARK = {
-  surface: "#1a1a19",
-  grid: "#2c2c2a",
-  axis: "#383835",
-  muted: "#898781",
-  ink: "#f0efec",
-  series: ["#3987e5", "#d95926", "#199e70", "#c98500"],
-};
-
-const query = "(prefers-color-scheme: dark)";
 
 export function useChartTheme() {
-  const [dark, setDark] = useState(() => window.matchMedia(query).matches);
-  useEffect(() => {
-    const media = window.matchMedia(query);
-    const onChange = (event) => setDark(event.matches);
-    media.addEventListener("change", onChange);
-    return () => media.removeEventListener("change", onChange);
-  }, []);
-  return dark ? DARK : LIGHT;
+  return PALETTES[useThemeMode()];
 }

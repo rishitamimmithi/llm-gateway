@@ -98,6 +98,10 @@ REDIS_URL: str = os.getenv("REDIS_URL", "").strip()
 
 # --- Requests ---
 MAX_PROMPT_CHARS: int = read_number("MAX_PROMPT_CHARS", "32000", cast=int)  # longer prompts get HTTP 422
+# How much of each prompt the request log keeps for the dashboard's "recent requests" table.
+# Prompts up to this length are stored WHOLE, and /stats/recent needs no API key yet, so set 0
+# (store nothing) anywhere other people's prompts pass through or the stats endpoints are reachable.
+PROMPT_PREVIEW_CHARS: int = read_number("PROMPT_PREVIEW_CHARS", "60", cast=int)
 
 # --- Caching (Redis is used for the exact cache too when REDIS_URL is set) ---
 EXACT_CACHE_ENABLED: bool = read_bool("EXACT_CACHE_ENABLED", "true")

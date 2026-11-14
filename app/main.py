@@ -10,6 +10,7 @@ import logging
 import math
 import time
 from contextlib import asynccontextmanager
+from contextvars import ContextVar
 from urllib.parse import urlparse
 
 import anyio
@@ -45,13 +46,29 @@ logger = logging.getLogger("gateway")
 # One shared request log for the whole app (tests swap this for a temporary one)
 request_log = RequestLog(config.DB_PATH)
 
+# Preview of the prompt this request is working on. Set at the start of /chat and /chat/stream, so
+# the router's log callback can store it without every layer passing the prompt along. Each request
+# runs in its own task with its own copy, and a shared (dedup) call copies its leader's, which has the same prompt.
+current_preview: ContextVar[str | None] = ContextVar("current_preview", default=None)
+
+
+def prompt_preview(prompt: str) -> str | None:
+    """First PROMPT_PREVIEW_CHARS characters with whitespace collapsed (None when previews are off)."""
+    limit = config.PROMPT_PREVIEW_CHARS
+    if limit <= 0:
+        return None
+    text = " ".join(prompt.split())
+    return text if len(text) <= limit else text[:limit].rstrip() + "…"
+
 
 def record_result(
     provider: str, model: str, prompt_tokens: int, completion_tokens: int, latency_ms: float, status: str
 ) -> None:
     """Called by the router after each provider attempt: price it, then log it."""
     cost = estimate_cost(model, prompt_tokens, completion_tokens, config.MODEL_PRICES)
-    request_log.log(provider, model, prompt_tokens, completion_tokens, latency_ms, status, cost)
+    request_log.log(
+        provider, model, prompt_tokens, completion_tokens, latency_ms, status, cost, current_preview.get()
+    )
 
 
 def _make_provider(name: str) -> tuple[Provider, str | None]:
@@ -210,7 +227,7 @@ async def rate_limited_client(response: Response, x_api_key: str | None = Header
 
 def cache_hit_response(kind: str, answer: CachedAnswer, start: float, similarity: float | None = None) -> dict:
     latency = (time.perf_counter() - start) * 1000
-    request_log.log_cache_hit(kind, answer.provider, answer.model, latency, answer.cost_usd)
+    request_log.log_cache_hit(kind, answer.provider, answer.model, latency, answer.cost_usd, current_preview.get())
     body = {
         "answer": answer.text,
         "provider": answer.provider,  # who originally answered
@@ -228,7 +245,7 @@ def cache_hit_response(kind: str, answer: CachedAnswer, start: float, similarity
 
 def deduplicated_response(result: ProviderResponse, cost: float | None, latency: float) -> dict:
     """This request shared another identical request's provider call, so it used no tokens itself."""
-    request_log.log_deduplicated(result.provider, result.model, latency, cost)
+    request_log.log_deduplicated(result.provider, result.model, latency, cost, current_preview.get())
     return {
         "answer": result.text,
         "provider": result.provider,
@@ -272,6 +289,7 @@ async def store_answer(prompt: str, vector, result: ProviderResponse, cost: floa
 @app.post("/chat")
 async def chat(req: ChatRequest, client_id: str = Depends(rate_limited_client)) -> dict:
     start = time.perf_counter()
+    current_preview.set(prompt_preview(req.prompt))
 
     if exact_cache is not None:
         cached = await exact_cache.get(req.prompt)
@@ -412,6 +430,7 @@ async def chat_stream(
     """/chat, but the answer arrives as Server-Sent Events while the model writes it.
     Same auth, rate limit and caches; no dedup (each stream is its own provider call)."""
     start = time.perf_counter()
+    current_preview.set(prompt_preview(req.prompt))
     # The rate-limit dependency put its header on `response`; a StreamingResponse needs it copied over.
     headers = {**SSE_HEADERS, **{k: v for k, v in response.headers.items() if k.lower() == "x-ratelimit-remaining"}}
 
@@ -442,6 +461,13 @@ async def chat_stream(
 @app.get("/stats")
 def stats() -> dict:
     return request_log.stats()
+
+
+@app.get("/stats/recent")
+def stats_recent(limit: int = Query(default=50, ge=1, le=500)) -> list[dict]:
+    """Newest logged requests first: time, prompt preview, status (ok / cache_exact / cache_semantic /
+    dedup / error / cancelled), provider, latency, cost (for the dashboard table)."""
+    return request_log.recent(limit)
 
 
 @app.get("/stats/timeseries")
