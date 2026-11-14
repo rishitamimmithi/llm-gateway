@@ -11,6 +11,7 @@ without interruption. That is why no lock is needed for "only one trial call at 
 """
 import time
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from enum import Enum
 from typing import TypeVar
 
@@ -27,6 +28,14 @@ class State(str, Enum):
     CLOSED = "closed"
     OPEN = "open"
     HALF_OPEN = "half_open"
+
+
+@dataclass(frozen=True)
+class Ticket:
+    """One allowed call: which open/close generation it started in, and whether it is the HALF_OPEN trial."""
+
+    generation: int
+    is_trial: bool
 
 
 class CircuitOpenError(ProviderError):
@@ -108,26 +117,35 @@ class CircuitBreaker:
 
     async def call(self, fn: Callable[[], Awaitable[T]]) -> T:
         """Run `fn()` through the breaker and record how it went."""
+        ticket = self.acquire()
+        try:
+            result = await fn()
+        except BaseException as e:
+            self.report(ticket, e)
+            raise
+        self.report(ticket, None)
+        return result
+
+    def acquire(self) -> Ticket:
+        """Start a call by hand (for work that isn't one awaitable, like a stream). Raises
+        CircuitOpenError if the call isn't allowed. Always pair it with exactly one report()."""
         is_trial = self.state is State.HALF_OPEN
         if not self.allow_request():
             raise CircuitOpenError(self.name)
-        generation = self._generation
-        try:
-            result = await fn()
-        except ProviderError as e:
-            if counts_as_failure(e):
-                self._finish(generation, is_trial, self.record_failure)
-            else:
-                # The provider answered; this prompt was the problem. Note: this does NOT reset the
-                # failure count in CLOSED - it is simply ignored (neither good nor bad news).
-                self._finish(generation, is_trial, self._release_trial)
-            raise
-        except BaseException:
-            # Cancelled, or a bug in our code: no verdict, but never keep the trial slot forever.
-            self._finish(generation, is_trial, self._release_trial)
-            raise
-        self._finish(generation, is_trial, self.record_success if is_trial else self._reset_failures)
-        return result
+        return Ticket(self._generation, is_trial)
+
+    def report(self, ticket: Ticket, error: BaseException | None) -> None:
+        """Record how a call started with acquire() ended: None = success."""
+        if error is None:
+            action = self.record_success if ticket.is_trial else self._reset_failures
+        elif isinstance(error, ProviderError) and counts_as_failure(error):
+            action = self.record_failure
+        else:
+            # A ProviderError caused by this prompt: the provider answered, so it's neither good nor
+            # bad news (the failure count in CLOSED is NOT reset). Cancelled or a bug in our code:
+            # no verdict. Either way, never keep the trial slot forever.
+            action = self._release_trial
+        self._finish(ticket.generation, ticket.is_trial, action)
 
     def _finish(self, generation: int, is_trial: bool, action: Callable[[], None]) -> None:
         if generation != self._generation:

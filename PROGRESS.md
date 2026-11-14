@@ -40,6 +40,9 @@ Phase 7 — prove it (plan approved: fake provider + Locust, Docker, CI, README)
 - Load-test fixes: SQLite WAL mode (64 → 128 req/s at 50 users, p50 670 → 300 ms); micro-batched embeddings (semantic run 137 → 378 req/s, p95 5.9 s → 1.2 s); review fixes for the batcher (shutdown, closed event loop, wrong vector count)
 - Phase 7 Steps 3–4 written: `Dockerfile` (semantic deps via `--build-arg SEMANTIC=true`), `dashboard/Dockerfile` + `nginx.conf`, `docker-compose.yml` (gateway + Redis + dashboard), `.github/workflows/tests.yml` (pytest, dashboard build, compose build). 419 tests pass with no `.env`; dashboard builds
 
+- Stretch: streaming (SSE) `POST /chat/stream`: `chunk` / `done` / `error` events; Groq streams for real, Gemini sends one piece, fake streams word by word; fallback only before the first piece; cache hits streamed; complete answers cached; client disconnect logged as `cancelled`. Checked live with the fake provider
+- Streaming review fixes: breaker verdict waits for the end of the stream (a provider that dies mid-answer every time now opens its breaker; breaker got `acquire()` / `report()`), Groq error pieces and streams cut before `[DONE]` raise instead of being cached, stream always closed on disconnect (`ClosingStreamingResponse`, shielded clean-up), bugs logged as `error` not `cancelled`. 440 tests pass
+
 ## In progress
 - Docker files not run yet: Docker isn't installed on this laptop (CI's `docker compose build` job will be the first check)
 - Phase 7 Step 5 written: README with results summary, Mermaid architecture diagram, Docker quick start, endpoints, load-test table, failover / rate limiting sections, known limits. Still missing: a dashboard screenshot
@@ -58,6 +61,7 @@ Phase 7 — prove it (plan approved: fake provider + Locust, Docker, CI, README)
 - Dashboard: if one of the three stats calls fails, the whole refresh is skipped and the banner says the gateway is unreachable
 - Rate-limited (429) requests are not logged to the database yet
 - First replay stalled: one Groq call logged 1340 s although each attempt has a 10 s total deadline (most likely the laptop slept mid-run; re-run was clean). Worth a look if it shows up again
+- Streams skip dedup; Gemini streams the whole answer as one piece (no `streamGenerateContent` yet)
 - Ollama provider from the Phase 2 list is not built yet (not needed for the done criteria)
 - Failed attempts are logged with 0 tokens / $0, though a provider may bill a request that failed late
 - Guard still lets through antonyms ("healthy"/"unhealthy", "most"/"least"), swapped numbers ("12 divided by 4" vs "4 divided by 12") and similar names (Slovakia/Slovenia)
@@ -113,6 +117,7 @@ Phase 7 — prove it (plan approved: fake provider + Locust, Docker, CI, README)
 - `app/cache/semantic.py` `embed` — micro-batching with futures; one worker task; cancelling safely at shutdown
 - `Dockerfile` / `docker-compose.yml` — image layers and caching; build args; healthchecks; service names as hostnames; volumes
 - `.github/workflows/tests.yml` — CI jobs; caching pip/npm; keeping heavy deps out of CI
+- `app/core/router.py` `stream` / `app/main.py` `/chat/stream` — SSE format; why fallback stops after the first piece; async generator clean-up on disconnect
 
 ## To rebuild myself later
 - `app/core/retry.py` — retry with exponential backoff and jitter
@@ -158,6 +163,10 @@ Phase 7 — prove it (plan approved: fake provider + Locust, Docker, CI, README)
 - Your README says 779 req/s at 390 ms p95. What setup produced that, and why would the number change in production?
 - Walk through the architecture diagram: what does a request that hits the semantic cache skip, and what does it still pay for?
 
+- Why does the gateway stop falling back once the first streamed piece is sent, and what does the client get instead?
+- A provider sends the first piece of every answer, then dies. Why did the circuit breaker never open in the first version, and how was it fixed?
+- What happens to the provider's connection when a client closes the tab mid-stream?
+
 ## Session log
 | Date | What we did |
 |---|---|
@@ -171,3 +180,4 @@ Phase 7 — prove it (plan approved: fake provider + Locust, Docker, CI, README)
 | 2026-11-14 | Money saved on a 300-request replay (71.3% hits, 75.1% cost cut); Phase 4 done; Phase 7 planned |
 | 2026-11-14 | Phase 7 Steps 1–4: fake provider, Locust (523 / 779 / 378 req/s), WAL + embedding batching fixes, Docker + compose, CI |
 | 2026-11-14 | Phase 7 Step 5: final README (diagram, Docker quick start, results, resume bullet numbers) |
+| 2026-11-14 | Stretch: streaming responses (SSE) via `POST /chat/stream`, review fixes (breaker, Groq stream errors, disconnect clean-up) |

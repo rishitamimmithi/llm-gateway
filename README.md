@@ -78,6 +78,7 @@ All settings (timeouts, retries, breaker, limits, cache sizes, threshold) are en
 | endpoint | what |
 |---|---|
 | `POST /chat` | `{"prompt": "..."}` → answer, provider, tokens, `cost_usd`, latency; cache hits say `"cache": "exact"/"semantic"` and `saved_usd` |
+| `POST /chat/stream` | same body; the answer arrives as Server-Sent Events while it's written: `chunk` `{text}` events, then `done` (provider, tokens, cost, cache, latency) or `error` if the provider breaks mid-answer. Same auth, rate limit and caches; 503 if every provider fails before the first piece |
 | `GET /stats` | totals per provider, cost, cache hits / misses / hit rate / money saved, deduplicated requests |
 | `GET /stats/timeseries?minutes=60&bucket=60` | per-bucket requests, cache hits, failures, p50/p95 latency, spent and saved |
 | `GET /health`, `GET /health/providers` | liveness; circuit breaker state per provider |
@@ -225,6 +226,7 @@ NOTES.md            design decisions: what I chose, the alternatives, and why
 
 ## Limits I know about
 - Dedup is per gateway instance; two instances can each make one call for the same prompt.
+- Streams (`/chat/stream`) skip dedup, and Gemini's stream is the whole answer in one piece (no real streaming yet).
 - `/stats`, `/stats/timeseries` and `/health` need no API key yet; lock them down before deploying publicly.
 - The cache is shared across all client keys (fine while all clients are mine).
 - The guard misses antonyms and swapped numbers; a small cross-encoder re-check would be the next step.

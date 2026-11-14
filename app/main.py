@@ -5,13 +5,16 @@ semantic cache, and only on a miss sends the prompt through the router (provider
 retries, circuit breakers, fallback). Identical prompts already in flight share that one call.
 Complete answers are stored in both caches.
 """
+import json
 import logging
 import math
 import time
 from contextlib import asynccontextmanager
 from urllib.parse import urlparse
 
+import anyio
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Response
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from redis.asyncio import Redis
 from redis.asyncio.retry import Retry
@@ -32,7 +35,7 @@ from app.core.token_bucket import TokenBucketLimiter
 from app.core.cost import estimate_cost
 from app.core.router import AllProvidersFailed, Route, Router
 from app.db.logger import COST_DECIMALS, RequestLog
-from app.providers.base import Provider, ProviderResponse
+from app.providers.base import Provider, ProviderError, ProviderResponse, StreamChunk
 from app.providers.fake import FakeProvider
 from app.providers.gemini import GeminiProvider
 from app.providers.groq import GroqProvider
@@ -250,6 +253,22 @@ async def semantic_vector(prompt: str):
         return None
 
 
+async def store_answer(prompt: str, vector, result: ProviderResponse, cost: float | None) -> None:
+    """Put a provider's answer in both caches, if it is complete (never reuse a cut-off or filtered answer)."""
+    if not result.complete:
+        return
+    try:
+        answer = CachedAnswer.from_response(result, cost)
+        if exact_cache is not None:
+            await exact_cache.set(prompt, answer)
+        if vector is not None:
+            semantic_cache.add(vector, answer, prompt)
+    except Exception:
+        # The answer is already paid for: a caching bug mustn't fail this request (and every
+        # request sharing it), so just skip caching.
+        logger.exception("Storing the answer in the cache failed")
+
+
 @app.post("/chat")
 async def chat(req: ChatRequest, client_id: str = Depends(rate_limited_client)) -> dict:
     start = time.perf_counter()
@@ -273,17 +292,7 @@ async def chat(req: ChatRequest, client_id: str = Depends(rate_limited_client)) 
                 return cached, None
         result = await router.chat(req.prompt)
         cost = estimate_cost(result.model, result.prompt_tokens, result.completion_tokens, config.MODEL_PRICES)
-        if result.complete:  # never reuse a cut-off or filtered answer
-            try:
-                answer = CachedAnswer.from_response(result, cost)
-                if exact_cache is not None:
-                    await exact_cache.set(req.prompt, answer)
-                if vector is not None:
-                    semantic_cache.add(vector, answer, req.prompt)
-            except Exception:
-                # The answer is already paid for: a caching bug mustn't fail this request (and every
-                # request sharing it), so just skip caching.
-                logger.exception("Storing the answer in the cache failed")
+        await store_answer(req.prompt, vector, result, cost)
         return result, cost
 
     try:
@@ -314,6 +323,120 @@ async def chat(req: ChatRequest, client_id: str = Depends(rate_limited_client)) 
         "cache": None,
         "deduplicated": False,
     }
+
+
+def sse(event: str, data: dict) -> str:
+    """One Server-Sent Event. json.dumps escapes newlines, so the data always fits on one line."""
+    return f"event: {event}\ndata: {json.dumps(data)}\n\n"
+
+
+class ClosingStreamingResponse(StreamingResponse):
+    """A StreamingResponse that always closes its event generator (and the router stream behind it).
+
+    Starlette leaves a half-read generator for the garbage collector when the client disconnects,
+    and never starts it at all if the client leaves before the first byte. Then the provider's
+    connection stays open and the request is never logged. Closing both here fixes that."""
+
+    def __init__(self, events, chunks=None, **kwargs) -> None:
+        super().__init__(events, **kwargs)
+        self._events = events
+        self._chunks = chunks
+
+    async def __call__(self, scope, receive, send) -> None:
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            with anyio.CancelScope(shield=True):
+                await self._events.aclose()
+                if self._chunks is not None:  # still open if `events` never started
+                    await self._chunks.aclose()
+
+
+SSE_HEADERS = {"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}  # stop proxies from holding pieces back
+
+
+async def cached_events(kind: str, answer: CachedAnswer, start: float, similarity: float | None = None):
+    """A cache hit sent as a stream: the whole answer in one piece, then `done`."""
+    done = cache_hit_response(kind, answer, start, similarity)
+    yield sse("chunk", {"text": done.pop("answer")})
+    yield sse("done", done)
+
+
+async def provider_events(first: StreamChunk, chunks, prompt: str, vector, start: float):
+    """Relay the router's pieces as `chunk` events; finish with `done` (or `error` if the provider
+    broke mid-answer: the client already has part of it, so there's no clean fallback)."""
+    try:
+        chunk = first
+        while chunk.final is None:
+            if chunk.text:
+                yield sse("chunk", {"text": chunk.text})
+            chunk = await anext(chunks)
+        result = chunk.final
+    except ProviderError as e:
+        yield sse("error", {"detail": str(e)})
+        return
+    except Exception:
+        logger.exception("Streaming failed")
+        yield sse("error", {"detail": "internal error"})
+        return
+    finally:
+        # Also runs when the client disconnects (the task is cancelled): shield the clean-up so the
+        # provider's connection is really closed and the request gets logged.
+        with anyio.CancelScope(shield=True):
+            await chunks.aclose()
+
+    cost = estimate_cost(result.model, result.prompt_tokens, result.completion_tokens, config.MODEL_PRICES)
+    await store_answer(prompt, vector, result, cost)
+    yield sse(
+        "done",
+        {
+            "provider": result.provider,
+            "model": result.model,
+            "latency_ms": round((time.perf_counter() - start) * 1000, 1),
+            "usage": {
+                "prompt_tokens": result.prompt_tokens,
+                "completion_tokens": result.completion_tokens,
+                "total_tokens": result.prompt_tokens + result.completion_tokens,
+            },
+            "cost_usd": None if cost is None else round(cost, COST_DECIMALS),
+            "cache": None,
+            "complete": result.complete,
+        },
+    )
+
+
+@app.post("/chat/stream")
+async def chat_stream(
+    req: ChatRequest, response: Response, client_id: str = Depends(rate_limited_client)
+) -> StreamingResponse:
+    """/chat, but the answer arrives as Server-Sent Events while the model writes it.
+    Same auth, rate limit and caches; no dedup (each stream is its own provider call)."""
+    start = time.perf_counter()
+    # The rate-limit dependency put its header on `response`; a StreamingResponse needs it copied over.
+    headers = {**SSE_HEADERS, **{k: v for k, v in response.headers.items() if k.lower() == "x-ratelimit-remaining"}}
+
+    def stream_of(events, chunks=None) -> StreamingResponse:
+        return ClosingStreamingResponse(events, chunks, media_type="text/event-stream", headers=headers)
+
+    if exact_cache is not None:
+        cached = await exact_cache.get(req.prompt)
+        if cached is not None:
+            return stream_of(cached_events("exact", cached, start))
+
+    vector = await semantic_vector(req.prompt)
+    if vector is not None:
+        hit: SemanticHit | None = semantic_cache.lookup(vector, req.prompt)
+        if hit is not None:
+            return stream_of(cached_events("semantic", hit.answer, start, hit.similarity))
+
+    # Wait for the first piece before replying: if every provider fails, the client gets a plain
+    # 503 instead of a 200 stream that breaks straight away.
+    chunks = router.stream(req.prompt)
+    try:
+        first = await anext(chunks)
+    except AllProvidersFailed as e:
+        raise HTTPException(status_code=503, detail=str(e))
+    return stream_of(provider_events(first, chunks, req.prompt, vector, start), chunks)
 
 
 @app.get("/stats")

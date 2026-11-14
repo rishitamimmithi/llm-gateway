@@ -3,11 +3,13 @@ The common "plug shape" every LLM provider must fit.
 
 - ProviderResponse: what a successful call returns (same fields for every provider).
 - ProviderError: what a failed call raises, labelled retryable or not.
-- Provider: the abstract interface. Each provider (Groq, Gemini, Ollama) implements chat().
+- Provider: the abstract interface. Each provider (Groq, Gemini, Ollama) implements chat(),
+  and may override stream() to send the answer piece by piece.
 """
 import asyncio
 import math
 from abc import ABC, abstractmethod
+from collections.abc import AsyncIterator
 from dataclasses import dataclass
 
 import httpx
@@ -23,6 +25,15 @@ class ProviderResponse:
     # False when the model did not finish normally (hit the token limit, safety filter, ...):
     # the answer is still returned to the client but never cached.
     complete: bool = True
+
+
+@dataclass(frozen=True)
+class StreamChunk:
+    """One piece of a streamed answer. The LAST chunk of every stream has `final` set: the whole
+    answer with its token counts, so the stream can be logged, priced and cached like chat()."""
+
+    text: str
+    final: ProviderResponse | None = None
 
 
 class ProviderError(Exception):
@@ -59,6 +70,13 @@ class Provider(ABC):
     @abstractmethod
     async def chat(self, prompt: str) -> ProviderResponse:
         """Send one prompt and return the answer, or raise ProviderError."""
+
+    async def stream(self, prompt: str) -> AsyncIterator[StreamChunk]:
+        """Send one prompt and yield the answer in pieces, ending with a `final` chunk.
+        Default for providers without real streaming: the whole answer as one piece."""
+        result = await self.chat(prompt)
+        yield StreamChunk(result.text)
+        yield StreamChunk("", final=result)
 
     async def aclose(self) -> None:
         """Release network connections when the gateway shuts down. Default: nothing to release."""
@@ -101,26 +119,40 @@ async def send_request(
         # trickling reply could run longer. asyncio.timeout adds a TOTAL deadline for the whole call.
         async with asyncio.timeout(timeout):
             resp = await client.post(url, json=json, headers=headers, timeout=timeout)
-    except (httpx.TimeoutException, TimeoutError) as e:
-        raise ProviderError(provider, f"timed out after {timeout}s", retryable=True) from e
-    except httpx.TransportError as e:  # could not connect, connection dropped, DNS failure...
-        raise ProviderError(provider, f"network error: {type(e).__name__}", retryable=True) from e
-    except httpx.HTTPError as e:  # anything else httpx raises (garbled body, too many redirects...)
-        raise ProviderError(provider, f"HTTP client error: {type(e).__name__}", retryable=False) from e
-    except (ValueError, httpx.InvalidURL) as e:
-        # The request could not even be built, e.g. a curly quote pasted into the API key in .env.
-        # Only the error TYPE is reported: its text could contain part of the key.
-        raise ProviderError(provider, f"could not build request: {type(e).__name__}", retryable=False) from e
+    except REQUEST_ERRORS as e:
+        raise request_error(provider, e, timeout) from e
 
     if not resp.is_success:
-        raise ProviderError(
-            provider,
-            f"HTTP {resp.status_code}: {error_message(resp, secret)}",
-            retryable=is_retryable_status(resp.status_code),
-            status_code=resp.status_code,
-            retry_after=retry_after_seconds(resp),
-        )
+        raise status_error(provider, resp, secret)
     return resp
+
+
+# Everything request_error() knows how to label (shared with streaming providers)
+REQUEST_ERRORS = (httpx.HTTPError, TimeoutError, ValueError, httpx.InvalidURL)
+
+
+def request_error(provider: str, e: Exception, timeout: float) -> ProviderError:
+    """Label an exception raised while sending a request or reading its reply."""
+    if isinstance(e, (httpx.TimeoutException, TimeoutError)):
+        return ProviderError(provider, f"timed out after {timeout}s", retryable=True)
+    if isinstance(e, httpx.TransportError):  # could not connect, connection dropped, DNS failure...
+        return ProviderError(provider, f"network error: {type(e).__name__}", retryable=True)
+    if isinstance(e, httpx.HTTPError):  # anything else httpx raises (garbled body, too many redirects...)
+        return ProviderError(provider, f"HTTP client error: {type(e).__name__}", retryable=False)
+    # The request could not even be built, e.g. a curly quote pasted into the API key in .env.
+    # Only the error TYPE is reported: its text could contain part of the key.
+    return ProviderError(provider, f"could not build request: {type(e).__name__}", retryable=False)
+
+
+def status_error(provider: str, resp: httpx.Response, secret: str) -> ProviderError:
+    """Label a non-2xx reply (its body must already be read)."""
+    return ProviderError(
+        provider,
+        f"HTTP {resp.status_code}: {error_message(resp, secret)}",
+        retryable=is_retryable_status(resp.status_code),
+        status_code=resp.status_code,
+        retry_after=retry_after_seconds(resp),
+    )
 
 
 def error_message(resp: httpx.Response, secret: str) -> str:
