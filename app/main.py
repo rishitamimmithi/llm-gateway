@@ -8,6 +8,7 @@ Complete answers are stored in both caches.
 import json
 import logging
 import math
+import os
 import time
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
@@ -15,7 +16,8 @@ from urllib.parse import urlparse
 
 import anyio
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Response
-from fastapi.responses import StreamingResponse
+from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from redis.asyncio import Redis
 from redis.asyncio.retry import Retry
@@ -196,7 +198,7 @@ class ChatRequest(BaseModel):
     prompt: str = Field(max_length=config.MAX_PROMPT_CHARS)
 
 
-@app.get("/health")
+@app.api_route("/health", methods=["GET", "HEAD"])  # HEAD: what many uptime monitors send
 def health() -> dict:
     return {"status": "ok"}
 
@@ -482,3 +484,23 @@ def stats_timeseries(
     if minutes * 60 / bucket > 2000:
         raise HTTPException(status_code=422, detail="too many buckets: use a bigger bucket or fewer minutes")
     return request_log.timeseries(minutes, bucket)
+
+
+def mount_dashboard(target: FastAPI, directory: str) -> bool:
+    """Serve the built dashboard (one service on Render: no nginx, no CORS): index.html at "/" and
+    the bundled files under /assets. Deliberately NOT a catch-all mount at "/": that would match
+    every path, so `GET /chat` would turn from 405 into 404 and `/stats/` would lose its redirect."""
+    index = os.path.join(directory, "index.html")
+    if not directory or not os.path.isfile(index):
+        return False  # not built (e.g. running from source): the API works on its own
+    assets = os.path.join(directory, "assets")
+    if os.path.isdir(assets):
+        target.mount("/assets", StaticFiles(directory=assets), name="dashboard-assets")
+    target.add_api_route(
+        "/", lambda: FileResponse(index), methods=["GET", "HEAD"], include_in_schema=False
+    )
+    return True
+
+
+if mount_dashboard(app, config.DASHBOARD_DIR):
+    logger.info("Serving the dashboard from %s at /", config.DASHBOARD_DIR)

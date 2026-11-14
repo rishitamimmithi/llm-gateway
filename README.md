@@ -58,7 +58,7 @@ cp .env.example .env        # add GROQ_API_KEY / GEMINI_API_KEY and one client k
 docker compose up --build
 ```
 
-- Gateway: http://localhost:8000. Dashboard: http://localhost:8080
+- Gateway: http://localhost:8000 (also serves the dashboard at `/`). Dashboard via nginx: http://localhost:8080
 - No provider keys? Set `PROVIDER_ORDER=fake` in `.env` to try everything with a fake provider.
 - Semantic cache in Docker: `SEMANTIC=true docker compose up --build` (PowerShell: `$env:SEMANTIC="true"; docker compose up --build`; adds CPU-only torch to the image), and `SEMANTIC_CACHE_ENABLED=true` in `.env`.
 - Compose runs the gateway, Redis (shared rate limits + exact cache) and the dashboard (nginx serving the React build and forwarding `/stats` and `/health` to the gateway). The request log lives in the `gateway-data` volume.
@@ -66,6 +66,25 @@ docker compose up --build
 ```
 curl -X POST localhost:8000/chat -H "X-API-Key: <your key>" -H "Content-Type: application/json" -d "{\"prompt\": \"hi\"}"
 ```
+
+## Deploy (Render, free plan)
+The `Dockerfile` builds one image with the API and the dashboard: `/` is the dashboard, `/docs` the API docs,
+and `/chat`, `/chat/stream`, `/stats/*`, `/health` the API. It listens on `$PORT` and runs without Redis
+(rate limits and the exact cache are in memory).
+
+1. Push the repo to GitHub, then in Render: **New → Blueprint** and pick the repo (it reads `render.yaml`).
+2. Fill in the secrets Render asks for: `GATEWAY_API_KEYS` (one or more client keys, comma-separated),
+   `GROQ_API_KEY`, `GEMINI_API_KEY`.
+3. Open `https://<service>.onrender.com/` for the dashboard, and call the API with a client key:
+   `curl -X POST https://<service>.onrender.com/chat -H "X-API-Key: <client key>" -H "Content-Type: application/json" -d "{\"prompt\": \"hi\"}"`
+
+`DEPLOY_PUBLIC=true` (set in `render.yaml`) refuses to start without client keys and stores no prompt text in
+the request log (`PROMPT_PREVIEW_CHARS` defaults to 0). Free-plan limits: the service sleeps after ~15 minutes
+idle (first request then takes ~1 minute), and the disk is wiped on every restart, so the request log, caches
+and dashboard history start empty. `/stats/*` and `/health` are public (no prompt text, but counts and costs are visible).
+
+Same image locally: `docker build -t llm-gateway .` then
+`docker run -p 8000:8000 -e GATEWAY_API_KEYS=demo-key -e PROVIDER_ORDER=fake llm-gateway` and open http://localhost:8000.
 
 ## Run locally (no Docker)
 1. `python -m venv .venv` then activate it (Windows: `.venv\Scripts\activate`, Mac/Linux: `source .venv/bin/activate`)

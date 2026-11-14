@@ -1,0 +1,24 @@
+# Render blueprint: the whole gateway (API + dashboard) as one free Docker web service.
+# Secrets are listed with sync: false, so Render asks for their values when the blueprint is created;
+# they never live in this file.
+services:
+  - type: web
+    name: llm-gateway
+    runtime: docker
+    plan: free
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /health
+    # Redeploys on every push to the connected branch (Render's default)
+    envVars:
+      # Safer defaults for a public URL: no prompt text in the request log, client keys required
+      - key: DEPLOY_PUBLIC
+        value: "true"
+      - key: PROVIDER_ORDER
+        value: groq,gemini
+      # No REDIS_URL: rate limits and the exact cache live in memory (one instance on the free plan)
+      - key: GATEWAY_API_KEYS
+        sync: false
+      - key: GROQ_API_KEY
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false

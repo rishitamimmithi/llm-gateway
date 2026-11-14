@@ -1,6 +1,12 @@
+import os
+
 import pytest
 
-import app.main as main
+# Don't serve whatever old dashboard/dist happens to be on this machine: tests must route the same
+# way here as in CI (which has no build). Set before app.main is imported, since it mounts at import.
+os.environ["DASHBOARD_DIR"] = ""
+
+import app.main as main  # noqa: E402
 from app.core.dedup import InFlight
 
 

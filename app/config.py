@@ -83,6 +83,12 @@ MODEL_PRICES: dict[str, tuple[float, float]] = {
 # --- Client API keys (comma-separated). Every /chat call needs one in the X-API-Key header. ---
 GATEWAY_API_KEYS: list[str] = [k.strip() for k in os.getenv("GATEWAY_API_KEYS", "").split(",") if k.strip()]
 
+# --- Public deploy (e.g. Render): safer defaults for a gateway anyone on the internet can reach ---
+DEPLOY_PUBLIC: bool = read_bool("DEPLOY_PUBLIC", "false")
+if DEPLOY_PUBLIC and not GATEWAY_API_KEYS:
+    # Every /chat call would get 401 anyway, but a public deploy with no keys is surely a mistake: fail loudly.
+    raise ValueError("DEPLOY_PUBLIC=true needs GATEWAY_API_KEYS (comma-separated client keys)")
+
 # --- Rate limiting (per client API key) ---
 RATE_LIMIT_ALGORITHM: str = os.getenv("RATE_LIMIT_ALGORITHM", "token_bucket").strip().lower()
 if RATE_LIMIT_ALGORITHM not in ("token_bucket", "sliding_window"):
@@ -101,7 +107,17 @@ MAX_PROMPT_CHARS: int = read_number("MAX_PROMPT_CHARS", "32000", cast=int)  # lo
 # How much of each prompt the request log keeps for the dashboard's "recent requests" table.
 # Prompts up to this length are stored WHOLE, and /stats/recent needs no API key yet, so set 0
 # (store nothing) anywhere other people's prompts pass through or the stats endpoints are reachable.
-PROMPT_PREVIEW_CHARS: int = read_number("PROMPT_PREVIEW_CHARS", "60", cast=int)
+# Public deploys store nothing unless PROMPT_PREVIEW_CHARS is set on purpose.
+def default_prompt_preview_chars(public: bool) -> str:
+    return "0" if public else "60"
+
+
+PROMPT_PREVIEW_CHARS: int = read_number(
+    "PROMPT_PREVIEW_CHARS", default_prompt_preview_chars(DEPLOY_PUBLIC), cast=int, allow_zero=True
+)
+
+# Built dashboard (npm run build) served at "/" when the folder exists; the Docker image puts it here
+DASHBOARD_DIR: str = os.getenv("DASHBOARD_DIR", "dashboard/dist")
 
 # --- Caching (Redis is used for the exact cache too when REDIS_URL is set) ---
 EXACT_CACHE_ENABLED: bool = read_bool("EXACT_CACHE_ENABLED", "true")

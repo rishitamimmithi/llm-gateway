@@ -48,8 +48,10 @@ All 7 phases done. Now: stretch ideas (streaming done; next candidates: cost-awa
 - Phase 7 Step 5: README with results summary, Mermaid architecture diagram, Docker quick start, endpoints, load-test table, dashboard screenshot (`docs/dashboard.png`), known limits
 - Phase 7 verified: Locust table (req/s, p50/p95/p99, errors, with and without cache) in `loadtest/results.md` + README; `docker compose up` (gateway + Redis + dashboard) runs on this laptop; GitHub Actions green on the last 3 pushes (pytest, dashboard build, compose build); 445 tests pass, dashboard builds; resume bullet filled with measured numbers. Phase 7 done
 
+- Render deploy as one service: Dockerfile builds the dashboard and the gateway serves it at `/` (`mount_dashboard`, after all API routes), listens on `$PORT`, no Redis needed; `DEPLOY_PUBLIC=true` (needs `GATEWAY_API_KEYS`, prompt previews off by default); `render.yaml` (free plan, Docker, `/health`, secrets `sync: false`); README "Deploy" section. Fix: `PROMPT_PREVIEW_CHARS=0` used to fail the startup number check. Image built and run like Render (`PORT=10000`): dashboard, `/docs`, 401 without key, healthy
+
 ## In progress
-- Nothing
+- Not deployed to Render yet (needs the blueprint created in the Render dashboard + secrets)
 
 ## Open bugs / questions
 - Gemini free tier is slow and unpredictable (1–22 s for tiny answers, one 30 s timeout)
@@ -118,6 +120,7 @@ All 7 phases done. Now: stretch ideas (streaming done; next candidates: cost-awa
 - `app/cache/semantic.py` `embed` — micro-batching with futures; one worker task; cancelling safely at shutdown
 - `Dockerfile` / `docker-compose.yml` — image layers and caching; build args; healthchecks; service names as hostnames; volumes
 - `.github/workflows/tests.yml` — CI jobs; caching pip/npm; keeping heavy deps out of CI
+- `Dockerfile` (multi-stage) / `app/main.py` `mount_dashboard` — build stage for the frontend; one service serving API + static files; why the "/" mount must come last; `$PORT` from the host
 - `app/db/logger.py` `LockedConnection` — why one SQLite connection can't be used by two threads at once; lock + read all rows inside it
 - `app/core/router.py` `stream` / `app/main.py` `/chat/stream` — SSE format; why fallback stops after the first piece; async generator clean-up on disconnect
 
