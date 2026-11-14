@@ -42,7 +42,8 @@ Phase 7 — prove it (plan approved: fake provider + Locust, Docker, CI, README)
 
 ## In progress
 - Docker files not run yet: Docker isn't installed on this laptop (CI's `docker compose build` job will be the first check)
-- Phase 7 Step 5: README (Mermaid diagram, docker quick start, load-test table, resume bullet)
+- Phase 7 Step 5 written: README with results summary, Mermaid architecture diagram, Docker quick start, endpoints, load-test table, failover / rate limiting sections, known limits. Still missing: a dashboard screenshot
+- Phase 7 not verified yet: needs a green CI run and `docker compose up` checked by hand
 
 ## Open bugs / questions
 - Gemini free tier is slow and unpredictable (1–22 s for tiny answers, one 30 s timeout)
@@ -71,7 +72,7 @@ Phase 7 — prove it (plan approved: fake provider + Locust, Docker, CI, README)
 ## Next steps
 1. Push and check the GitHub Actions run is green (first real test of the Docker build)
 2. Install Docker Desktop, run `docker compose up --build`, check `/chat` on :8000 and the dashboard on :8080
-3. Phase 7 step 5: README with Mermaid architecture diagram, docker quick start, load-test table, dashboard screenshot, filled resume bullet
+3. Add a dashboard screenshot to the README (`docs/dashboard.png`), then run the Phase 7 verify pass
 4. Optional: remove "last" from the guard's number words, then write a fresh hold-out set before re-measuring
 
 ## To learn later
@@ -154,6 +155,8 @@ Phase 7 — prove it (plan approved: fake provider + Locust, Docker, CI, README)
 - A 10 ms SQLite commit capped the gateway at ~64 req/s even though the provider took 300 ms. Why does a blocking call on the event loop hurt every request, not just its own?
 - How does micro-batching cut embedding cost without making a single request wait longer when traffic is light?
 - Why do the load tests use a fake provider, and what would the numbers measure if they hit Groq's free tier instead?
+- Your README says 779 req/s at 390 ms p95. What setup produced that, and why would the number change in production?
+- Walk through the architecture diagram: what does a request that hits the semantic cache skip, and what does it still pay for?
 
 ## Session log
 | Date | What we did |
@@ -167,3 +170,4 @@ Phase 7 — prove it (plan approved: fake provider + Locust, Docker, CI, README)
 | 2026-11-14 | Phase 6: `/stats/timeseries` endpoint + React dashboard (requests, latency p50/p95, cost, breaker states) |
 | 2026-11-14 | Money saved on a 300-request replay (71.3% hits, 75.1% cost cut); Phase 4 done; Phase 7 planned |
 | 2026-11-14 | Phase 7 Steps 1–4: fake provider, Locust (523 / 779 / 378 req/s), WAL + embedding batching fixes, Docker + compose, CI |
+| 2026-11-14 | Phase 7 Step 5: final README (diagram, Docker quick start, results, resume bullet numbers) |
