@@ -8,6 +8,8 @@ provider, and the gateway adds caching, rate limiting, failover, request dedupli
 **Results in one line:** cut API cost by **75%** at a **71%** cache hit rate with **≤7%** false semantic hits
 (held-out set), sustaining **779 req/s at 390 ms p95** on one worker (with a simulated 300 ms provider), 0 errors.
 
+![Dashboard: KPI cards, requests, provider latency and cost charts](docs/dashboard.png)
+
 | what | measured | where |
 |---|---|---|
 | Cost cut on a realistic prompt mix | 75.1% (71.3% hit rate, 0 wrong answers seen) | [Money saved](#money-saved-on-a-realistic-prompt-mix) |
@@ -200,8 +202,6 @@ Virtual nodes even out the load: with 4 nodes the busiest one holds 41% of keys 
 28.7% with 100 and 26.0% with 500 (ideal 25%).
 
 ## Dashboard
-![Dashboard: KPI cards, requests, provider latency and cost charts](docs/dashboard.png)
-
 React (Vite + recharts) app in `dashboard/`, refreshing every 5 s. Dark by default with a light toggle.
 - Header: gateway health (all circuits closed = healthy, any open / half-open = degraded) and the time range
   (15 min, 1 hour, 6 hours, 24 hours)
