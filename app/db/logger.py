@@ -52,28 +52,39 @@ class RequestLog:
         self, kind: str, provider: str, model: str, latency_ms: float, saved_usd: float | None
     ) -> None:
         """A request answered from the cache: no tokens, no cost, status cache_exact / cache_semantic."""
+        self._log_saved(f"cache_{kind}", provider, model, latency_ms, saved_usd)
+
+    def log_deduplicated(self, provider: str, model: str, latency_ms: float, saved_usd: float | None) -> None:
+        """A request that shared another identical in-flight request's provider call (status dedup)."""
+        self._log_saved("dedup", provider, model, latency_ms, saved_usd)
+
+    def _log_saved(self, status: str, provider: str, model: str, latency_ms: float, saved_usd: float | None) -> None:
         self.db.execute(
             "INSERT INTO requests (ts, provider, model, prompt_tokens, completion_tokens, latency_ms, status, "
             "cost_usd, saved_usd) VALUES (?, ?, ?, 0, 0, ?, ?, 0, ?)",
-            (time.time(), provider, model, latency_ms, f"cache_{kind}", saved_usd),
+            (time.time(), provider, model, latency_ms, status, saved_usd),
         )
         self.db.commit()
 
     def cache_stats(self) -> dict:
-        """Misses = requests a provider answered (status ok); hits = requests the cache answered."""
-        misses, exact, semantic, saved, unpriced = self.db.execute(
+        """Misses = requests a provider answered (status ok); hits = requests the cache answered.
+        Deduplicated requests (shared an in-flight call) are counted on their own, not as hits,
+        but the money they saved is included in saved_usd."""
+        misses, exact, semantic, dedup, saved, unpriced = self.db.execute(
             "SELECT SUM(status = 'ok'), SUM(status = 'cache_exact'), SUM(status = 'cache_semantic'), "
-            "SUM(saved_usd), SUM(status IN ('cache_exact', 'cache_semantic') AND saved_usd IS NULL) FROM requests"
+            "SUM(status = 'dedup'), SUM(saved_usd), "
+            "SUM(status IN ('cache_exact', 'cache_semantic', 'dedup') AND saved_usd IS NULL) FROM requests"
         ).fetchone()
-        misses, exact, semantic = misses or 0, exact or 0, semantic or 0
+        misses, exact, semantic, dedup = misses or 0, exact or 0, semantic or 0, dedup or 0
         total = misses + exact + semantic
         return {
             "exact_hits": exact,
             "semantic_hits": semantic,
             "misses": misses,
+            "deduplicated": dedup,
             "hit_rate": round((exact + semantic) / total, 4) if total else 0,
             "saved_usd": round(saved or 0, COST_DECIMALS),
-            "unpriced_hits": unpriced or 0,  # hits whose original model had no price
+            "unpriced_hits": unpriced or 0,  # hits / shared calls whose model had no price
         }
 
     def stats(self) -> dict:

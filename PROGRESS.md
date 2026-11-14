@@ -3,7 +3,7 @@
 Updated at the end of every work session.
 
 ## Current phase
-Phase 4 — Caching (built; 328 tests pass). Left for done: measure money saved on real traffic and put it in the README.
+Phase 5 — Dedup + consistent hashing (built; 393 tests pass; both done criteria shown by `loadtest/dedup_burst.py` and `eval/ring_moves.py`). Phase 4 still needs money saved on real traffic in the README.
 
 ## Done
 - Phase 1 complete: proxy runs, requests logged, `/stats` matches the database, pushed with `.env` excluded
@@ -26,6 +26,10 @@ Phase 4 — Caching (built; 328 tests pass). Left for done: measure money saved 
 - Phase 4 Step 6: semantic guard (`app/cache/guard.py`): numbers, negation, to/from direction must match. False hits at 0.94: 22% → 3% (hold-out: 40% → 7%), hit rate unchanged
 - Guard review fixes: linear-time checks, features stored per entry, prompt length cap (422), digits inside words (gpt4), apostrophe-less negation (isnt), "how to" not treated as a direction; eval numbers unchanged
 - Phase 4 Step 5: false-hit test set (123 pairs: 50 same, 73 look-alike) + `python -m eval.false_hit_eval`; results in `eval/results.md` and README. At 0.90: 78% hits / 33% false hits; at 0.94: 60% / 22%. Direction swaps ("5 miles to km" vs "5 km to miles") score 0.99+, so a threshold alone can't stop them
+- Phase 5 Step 1: request dedup (`app/core/dedup.py`): identical in-flight prompts share one provider call; errors shared; shared requests logged as `dedup` with `saved_usd`; `/stats` `cache.deduplicated`; `DEDUP_ENABLED`
+- Phase 5 Step 2: consistent hash ring (`app/core/consistent_hash.py`, MD5, 100 virtual nodes) + sharded exact cache over several Redis nodes (`app/cache/sharded.py`, `CACHE_NODES`)
+- Phase 5 proof: 50 identical requests → 1 provider call (49 shared, same p95); adding a 4th node moves 24.1% of keys vs 74.9% with `hash % N`
+- Phase 5 review fixes: wait for shared calls at shutdown, caching errors after a paid answer fail open, exact cache re-checked before calling providers, cache node names without passwords, repeated `CACHE_NODES` dropped
 
 ## In progress
 - Nothing
@@ -41,11 +45,14 @@ Phase 4 — Caching (built; 328 tests pass). Left for done: measure money saved 
 - Guard treats "last" as a number word, so "undo my last commit" vs "revert the most recent commit" is blocked (found on the hold-out set; not fixed yet so the hold-out numbers stay honest)
 - `/stats` hit rate counts every old `ok` row as a miss, so use a fresh `requests.db` when measuring
 - Caches are shared across client keys (fine while all clients are mine)
+- Followers of a failed shared call get 503 but only the leader's attempts are logged, so `/stats` undercounts failed client requests
+- Dedup is per gateway instance: two instances can each make one call for the same prompt
+- Sharded cache has no live add/remove of nodes from config (only `add_node` / `remove_node` in code)
 - `matplotlib` not installed, so `eval/tradeoff.png` isn't drawn yet
 
 ## Next steps
 1. Measure money saved: replay a realistic prompt mix (with repeats) through the gateway with a fresh `requests.db`, record hit rate and `saved_usd` in the README (Phase 4 done criteria)
-2. Phase 5: request deduplication (in-flight futures map), then consistent hashing
+2. Phase 6: React dashboard (requests over time, p50/p95, cost, cache hit rate, breaker states); first add a stats endpoint for time series and breaker state
 3. Optional: remove "last" from the guard's number words, then write a fresh hold-out set before re-measuring
 
 ## To learn later
@@ -72,6 +79,10 @@ Phase 4 — Caching (built; 328 tests pass). Left for done: measure money saved 
 - `eval/false_hit_eval.py` — hit rate vs false-hit rate vs threshold; why embeddings miss word order and negation
 - `app/providers/*` — finish reasons; only cache complete answers
 - `app/cache/guard.py` — why embeddings ignore word order; cheap rule checks; next-best match; hold-out set to avoid fitting rules to the test
+- `app/core/dedup.py` — in-flight map of asyncio Tasks; leader vs followers; `asyncio.shield`; done callback removes the key; shared errors stop a thundering herd
+- `app/core/consistent_hash.py` — hash ring; virtual nodes; binary search with wrap-round; why `hash % N` moves most keys
+- `app/cache/sharded.py` — routing cache keys to nodes; moved keys just miss once
+- `loadtest/dedup_burst.py` / `eval/ring_moves.py` — proving dedup and key movement with numbers
 
 ## To rebuild myself later
 - `app/core/retry.py` — retry with exponential backoff and jitter
@@ -79,11 +90,14 @@ Phase 4 — Caching (built; 328 tests pass). Left for done: measure money saved 
 - `app/core/token_bucket.py` — token bucket rate limiter
 - `app/core/sliding_window.py` — sliding window log rate limiter
 - `app/core/lru_cache.py` — LRU cache with TTL
+- `app/core/dedup.py` — request deduplication (in-flight map)
+- `app/core/consistent_hash.py` — consistent hash ring with virtual nodes
 
 ## Improvement ideas
 - Log one row per attempt (attempt number, error type) instead of one per request
 - Return 504 for timeouts instead of 502
 - Compute cost once per request (now priced in both the log callback and `/chat`)
+- Cross-instance dedup: Redis `SET NX` lock per prompt + pub/sub to hand the answer to other instances
 - Small cross-encoder re-check for semantic hits, to catch antonyms the guard misses
 
 ## Interview practice questions
@@ -97,6 +111,9 @@ Phase 4 — Caching (built; 328 tests pass). Left for done: measure money saved 
 - Why is a cut-off (MAX_TOKENS) answer returned to the client but not cached?
 - Why did you test the guard on a hold-out set, and what would it mean if hold-out results were much worse?
 - Why store an unknown price as NULL instead of 0?
+- 50 identical prompts arrive at once and the provider is down. How many provider calls happen with and without dedup, and why does sharing the error matter?
+- Why does each waiter await `asyncio.shield(task)` instead of the task itself?
+- Going from 3 to 4 cache nodes, why does `hash % N` move ~75% of keys while a hash ring moves ~25%? What do virtual nodes fix?
 
 ## Session log
 | Date | What we did |
@@ -105,4 +122,5 @@ Phase 4 — Caching (built; 328 tests pass). Left for done: measure money saved 
 | 2026-11-14 | Phase 2 Steps 5–9: circuit breaker, router with fallback, cost tracking, failover demo; Phase 2 done |
 | 2026-11-14 | Phase 3: API keys, token bucket, sliding window, Redis (Lua) versions, 429 + Retry-After |
 | 2026-11-14 | Phase 4: LRU + TTL, exact cache (memory / Redis), semantic cache, false-hit eval (123 pairs) |
+| 2026-11-14 | Phase 5: request dedup, consistent hash ring, sharded exact cache, burst + key-movement demos |
 | 2026-11-14 | Semantic guard (numbers, negation, direction); false hits 22% → 3% at 0.94; 30-pair hold-out set |

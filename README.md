@@ -22,8 +22,9 @@ provider fallback and cost tracking.
 - [x] Step 2: second provider, fallback, circuit breaker
 - [x] Step 3: per-key rate limiting (token bucket or sliding window, optional Redis)
 - [~] Step 4: exact cache (done), semantic cache + false-hit test set (done); money saved on real traffic still to measure
-- [ ] Step 5: React dashboard
-- [ ] Step 6: load testing, Docker, deployment
+- [x] Step 5: request deduplication + consistent hashing for cache nodes
+- [ ] Step 6: React dashboard
+- [ ] Step 7: load testing, Docker, deployment
 
 ## Caching
 - **Exact cache**: same prompt (extra spaces ignored) gets the stored answer. Own LRU + TTL cache in memory, or Redis when `REDIS_URL` is set. Responses say `"cache": "exact"` and show `saved_usd`.
@@ -56,3 +57,33 @@ What still gets through: antonyms ("healthy" vs "unhealthy", "most" vs "least"),
 
 Embedding similarity alone can't tell "convert 5 miles to km" from "convert 5 km to miles" (similarity 0.99), so the
 look-alike set is a stress test: real traffic has far fewer near-misses, but these are exactly the wrong answers a cache must not give.
+
+## Request deduplication
+If identical prompts (extra spaces ignored) arrive while one is already waiting on a provider, they all share
+that one call (`app/core/dedup.py`). Shared responses say `"deduplicated": true`, cost $0 and show `saved_usd`;
+`/stats` counts them under `cache.deduplicated`. If the call fails, every waiting request gets the same 503
+instead of each retrying. Turn off with `DEDUP_ENABLED=false`.
+
+Burst of 50 identical requests, fake provider taking 0.5 s (`python -m loadtest.dedup_burst`):
+
+| run | requests | provider calls | shared | p50 ms | p95 ms |
+|---|---|---|---|---|---|
+| dedup on | 50 | 1 | 49 | 542 | 558 |
+| dedup off | 50 | 50 | 0 | 527 | 549 |
+
+Same latency, 49 fewer provider calls. Against a running gateway: `python -m loadtest.dedup_burst --url http://localhost:8000 --key <client key>`.
+
+## Consistent hashing (sharded exact cache)
+With `CACHE_NODES=redis://host1:6379/0,redis://host2:6379/0` (2+ URLs) the exact cache is split across the Redis
+nodes by a consistent hash ring (`app/core/consistent_hash.py`, 100 virtual nodes per node). Keys moved when the
+node count changes, 100,000 keys (`python -m eval.ring_moves`):
+
+| change | ideal | consistent hashing | hash % N |
+|---|---|---|---|
+| 3 -> 4 nodes | 25% | 24.1% | 74.9% |
+| 4 -> 5 nodes | 20% | 19.9% | 80.1% |
+| 4 -> 3 nodes | 25% | 24.1% | 74.9% |
+| 10 -> 11 nodes | 9% | 8.9% | 90.8% |
+
+Virtual nodes even out the load: with 4 nodes the busiest one holds 41% of keys with 1 virtual node each,
+28.7% with 100 and 26.0% with 500 (ideal 25%).

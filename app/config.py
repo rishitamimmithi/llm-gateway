@@ -97,6 +97,13 @@ MAX_PROMPT_CHARS: int = read_number("MAX_PROMPT_CHARS", "32000", cast=int)  # lo
 EXACT_CACHE_ENABLED: bool = read_bool("EXACT_CACHE_ENABLED", "true")
 CACHE_TTL_SECONDS: float = read_number("CACHE_TTL_SECONDS", "3600")  # how long an answer may be reused
 CACHE_MAX_ENTRIES: int = read_number("CACHE_MAX_ENTRIES", "1000", cast=int)  # per cache, in memory
+# Several cache nodes (comma-separated Redis URLs): the exact cache is split across them with a
+# consistent hash ring. Empty = one cache (Redis at REDIS_URL, or in memory).
+# Repeats are dropped (the same Redis listed twice is still one node).
+CACHE_NODES: list[str] = list(dict.fromkeys(url.strip() for url in os.getenv("CACHE_NODES", "").split(",") if url.strip()))
+CACHE_VIRTUAL_NODES: int = read_number("CACHE_VIRTUAL_NODES", "100", cast=int)  # ring positions per node
+# Identical requests in flight at the same time share one provider call
+DEDUP_ENABLED: bool = read_bool("DEDUP_ENABLED", "true")
 # Semantic cache is off by default: it needs sentence-transformers (pip install -r requirements-semantic.txt)
 SEMANTIC_CACHE_ENABLED: bool = read_bool("SEMANTIC_CACHE_ENABLED", "false")
 EMBEDDING_MODEL: str = os.getenv("EMBEDDING_MODEL", "sentence-transformers/all-MiniLM-L6-v2")

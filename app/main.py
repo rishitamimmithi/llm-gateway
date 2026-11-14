@@ -2,12 +2,14 @@
 LLM Gateway - FastAPI routes.
 /chat checks the client's API key and rate limit, then looks in the exact cache, then the
 semantic cache, and only on a miss sends the prompt through the router (providers in order,
-retries, circuit breakers, fallback). Complete answers are stored in both caches.
+retries, circuit breakers, fallback). Identical prompts already in flight share that one call.
+Complete answers are stored in both caches.
 """
 import logging
 import math
 import time
 from contextlib import asynccontextmanager
+from urllib.parse import urlparse
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Response
 from pydantic import BaseModel, Field
@@ -17,10 +19,12 @@ from redis.backoff import NoBackoff
 
 from app import config
 from app.cache.answer import CachedAnswer
-from app.cache.exact import ExactCache, MemoryExactCache, RedisExactCache
+from app.cache.exact import ExactCache, MemoryExactCache, RedisExactCache, cache_key
+from app.cache.sharded import ShardedExactCache
 from app.cache.semantic import SemanticCache, SemanticHit, SentenceTransformerEmbedder
 from app.core.api_keys import ApiKeys
 from app.core.circuit_breaker import CircuitBreaker
+from app.core.dedup import InFlight
 from app.core.rate_limiter import RateLimiter
 from app.core.redis_limiters import RedisSlidingWindowLimiter, RedisTokenBucketLimiter
 from app.core.sliding_window import SlidingWindowLimiter
@@ -28,7 +32,7 @@ from app.core.token_bucket import TokenBucketLimiter
 from app.core.cost import estimate_cost
 from app.core.router import AllProvidersFailed, Route, Router
 from app.db.logger import COST_DECIMALS, RequestLog
-from app.providers.base import Provider
+from app.providers.base import Provider, ProviderResponse
 from app.providers.gemini import GeminiProvider
 from app.providers.groq import GroqProvider
 
@@ -79,10 +83,10 @@ def build_router() -> Router:
     )
 
 
-def make_redis() -> Redis:
+def make_redis(url: str | None = None) -> Redis:
     # No client-side retries: if Redis is down we'd rather fail open fast than make every request wait.
     return Redis.from_url(
-        config.REDIS_URL, socket_timeout=0.5, socket_connect_timeout=0.5, retry=Retry(NoBackoff(), 0)
+        url or config.REDIS_URL, socket_timeout=0.5, socket_connect_timeout=0.5, retry=Retry(NoBackoff(), 0)
     )
 
 
@@ -99,9 +103,21 @@ def build_limiter() -> RateLimiter:
     return SlidingWindowLimiter(config.SLIDING_WINDOW_LIMIT, config.SLIDING_WINDOW_SECONDS)
 
 
+def cache_node_name(url: str) -> str:
+    """Ring name for a cache node: host:port/db, without any password, so changing a password
+    doesn't move keys and the secret never shows up in logs."""
+    parts = urlparse(url)
+    return f"{parts.hostname}:{parts.port or 6379}{parts.path or '/0'}"
+
+
 def build_exact_cache() -> ExactCache | None:
     if not config.EXACT_CACHE_ENABLED:
         return None
+    if len(config.CACHE_NODES) > 1:
+        nodes = {cache_node_name(url): RedisExactCache(make_redis(url), config.CACHE_TTL_SECONDS) for url in config.CACHE_NODES}
+        return ShardedExactCache(nodes, virtual_nodes=config.CACHE_VIRTUAL_NODES)
+    if config.CACHE_NODES:
+        return RedisExactCache(make_redis(config.CACHE_NODES[0]), config.CACHE_TTL_SECONDS)
     if config.REDIS_URL:
         return RedisExactCache(make_redis(), config.CACHE_TTL_SECONDS)
     return MemoryExactCache(config.CACHE_MAX_ENTRIES, config.CACHE_TTL_SECONDS)
@@ -127,6 +143,8 @@ limiter: RateLimiter = build_limiter()
 # Caches (None = turned off in config; tests swap these too)
 exact_cache: ExactCache | None = build_exact_cache()
 semantic_cache: SemanticCache | None = build_semantic_cache()
+# Provider calls in flight, keyed by the exact-cache key (None = dedup off; tests swap this too)
+inflight: InFlight | None = InFlight() if config.DEDUP_ENABLED else None
 if not len(api_keys):
     logger.warning("No GATEWAY_API_KEYS set: every /chat request will be rejected with 401")
 
@@ -136,6 +154,8 @@ async def lifespan(app: FastAPI):
     if semantic_cache is not None:
         await semantic_cache.embed("warm up")  # load the model now, not during the first request
     yield  # the server runs while we are "paused" here
+    if inflight is not None:
+        await inflight.aclose()  # finish shared provider calls before closing their connections
     await router.aclose()  # on shutdown: close the providers' shared network connections
     await limiter.aclose()
     if exact_cache is not None:
@@ -197,6 +217,22 @@ def cache_hit_response(kind: str, answer: CachedAnswer, start: float, similarity
     return body
 
 
+def deduplicated_response(result: ProviderResponse, cost: float | None, latency: float) -> dict:
+    """This request shared another identical request's provider call, so it used no tokens itself."""
+    request_log.log_deduplicated(result.provider, result.model, latency, cost)
+    return {
+        "answer": result.text,
+        "provider": result.provider,
+        "model": result.model,
+        "latency_ms": round(latency, 1),
+        "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+        "cost_usd": 0,
+        "cache": None,
+        "deduplicated": True,
+        "saved_usd": None if cost is None else round(cost, COST_DECIMALS),
+    }
+
+
 async def semantic_vector(prompt: str):
     """Embed the prompt for the semantic cache; any embedding failure just skips that cache."""
     if semantic_cache is None:
@@ -223,20 +259,40 @@ async def chat(req: ChatRequest, client_id: str = Depends(rate_limited_client)) 
         if hit is not None:
             return cache_hit_response("semantic", hit.answer, start, hit.similarity)
 
-    try:
+    async def ask_providers() -> tuple[ProviderResponse | CachedAnswer, float | None]:
+        # Check again: a shared call for this prompt may have finished while we were embedding it.
+        if exact_cache is not None:
+            cached = await exact_cache.get(req.prompt)
+            if cached is not None:
+                return cached, None
         result = await router.chat(req.prompt)
+        cost = estimate_cost(result.model, result.prompt_tokens, result.completion_tokens, config.MODEL_PRICES)
+        if result.complete:  # never reuse a cut-off or filtered answer
+            try:
+                answer = CachedAnswer.from_response(result, cost)
+                if exact_cache is not None:
+                    await exact_cache.set(req.prompt, answer)
+                if vector is not None:
+                    semantic_cache.add(vector, answer, req.prompt)
+            except Exception:
+                # The answer is already paid for: a caching bug mustn't fail this request (and every
+                # request sharing it), so just skip caching.
+                logger.exception("Storing the answer in the cache failed")
+        return result, cost
+
+    try:
+        if inflight is not None:
+            (result, cost), shared = await inflight.run(cache_key(req.prompt), ask_providers)
+        else:
+            (result, cost), shared = await ask_providers(), False
     except AllProvidersFailed as e:
         raise HTTPException(status_code=503, detail=str(e))
 
+    if isinstance(result, CachedAnswer):
+        return cache_hit_response("exact", result, start)
     latency = (time.perf_counter() - start) * 1000
-    cost = estimate_cost(result.model, result.prompt_tokens, result.completion_tokens, config.MODEL_PRICES)
-
-    if result.complete:  # never reuse a cut-off or filtered answer
-        answer = CachedAnswer.from_response(result, cost)
-        if exact_cache is not None:
-            await exact_cache.set(req.prompt, answer)
-        if vector is not None:
-            semantic_cache.add(vector, answer, req.prompt)
+    if shared:
+        return deduplicated_response(result, cost, latency)
 
     return {
         "answer": result.text,
@@ -250,6 +306,7 @@ async def chat(req: ChatRequest, client_id: str = Depends(rate_limited_client)) 
         },
         "cost_usd": None if cost is None else round(cost, COST_DECIMALS),  # None = model has no price in config
         "cache": None,
+        "deduplicated": False,
     }
 
 

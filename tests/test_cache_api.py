@@ -72,7 +72,7 @@ def test_stats_report_hits_misses_and_money_saved(setup):
     stats = client.get("/stats").json()
     assert stats["successful_requests"] == 2  # provider answers only
     assert stats["cache"] == {
-        "exact_hits": 2, "semantic_hits": 0, "misses": 2, "hit_rate": 0.5, "saved_usd": pytest.approx(32e-6),
+        "exact_hits": 2, "semantic_hits": 0, "misses": 2, "deduplicated": 0, "hit_rate": 0.5, "saved_usd": pytest.approx(32e-6),
         "unpriced_hits": 0,
     }
 
