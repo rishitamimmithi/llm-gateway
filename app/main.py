@@ -1,7 +1,8 @@
 """
 LLM Gateway - FastAPI routes.
-/chat checks the client's API key and rate limit, then sends the prompt through the router:
-providers in order, retries, circuit breakers, fallback.
+/chat checks the client's API key and rate limit, then looks in the exact cache, then the
+semantic cache, and only on a miss sends the prompt through the router (providers in order,
+retries, circuit breakers, fallback). Complete answers are stored in both caches.
 """
 import logging
 import math
@@ -15,6 +16,9 @@ from redis.asyncio.retry import Retry
 from redis.backoff import NoBackoff
 
 from app import config
+from app.cache.answer import CachedAnswer
+from app.cache.exact import ExactCache, MemoryExactCache, RedisExactCache
+from app.cache.semantic import SemanticCache, SemanticHit, SentenceTransformerEmbedder
 from app.core.api_keys import ApiKeys
 from app.core.circuit_breaker import CircuitBreaker
 from app.core.rate_limiter import RateLimiter
@@ -75,14 +79,18 @@ def build_router() -> Router:
     )
 
 
+def make_redis() -> Redis:
+    # No client-side retries: if Redis is down we'd rather fail open fast than make every request wait.
+    return Redis.from_url(
+        config.REDIS_URL, socket_timeout=0.5, socket_connect_timeout=0.5, retry=Retry(NoBackoff(), 0)
+    )
+
+
 def build_limiter() -> RateLimiter:
     """Pick the algorithm from config; keep its state in Redis if REDIS_URL is set, else in memory."""
     token_bucket = config.RATE_LIMIT_ALGORITHM == "token_bucket"
     if config.REDIS_URL:
-        # No client-side retries: if Redis is down we'd rather fail open fast than make every request wait.
-        redis = Redis.from_url(
-            config.REDIS_URL, socket_timeout=0.5, socket_connect_timeout=0.5, retry=Retry(NoBackoff(), 0)
-        )
+        redis = make_redis()
         if token_bucket:
             return RedisTokenBucketLimiter(redis, config.TOKEN_BUCKET_CAPACITY, config.TOKEN_BUCKET_REFILL_PER_SECOND)
         return RedisSlidingWindowLimiter(redis, config.SLIDING_WINDOW_LIMIT, config.SLIDING_WINDOW_SECONDS)
@@ -91,20 +99,46 @@ def build_limiter() -> RateLimiter:
     return SlidingWindowLimiter(config.SLIDING_WINDOW_LIMIT, config.SLIDING_WINDOW_SECONDS)
 
 
+def build_exact_cache() -> ExactCache | None:
+    if not config.EXACT_CACHE_ENABLED:
+        return None
+    if config.REDIS_URL:
+        return RedisExactCache(make_redis(), config.CACHE_TTL_SECONDS)
+    return MemoryExactCache(config.CACHE_MAX_ENTRIES, config.CACHE_TTL_SECONDS)
+
+
+def build_semantic_cache() -> SemanticCache | None:
+    if not config.SEMANTIC_CACHE_ENABLED:
+        return None
+    return SemanticCache(
+        SentenceTransformerEmbedder(config.EMBEDDING_MODEL),
+        threshold=config.SEMANTIC_CACHE_THRESHOLD,
+        max_entries=config.CACHE_MAX_ENTRIES,
+        ttl_seconds=config.CACHE_TTL_SECONDS,
+    )
+
+
 # The router that answers /chat (tests swap this for one with fake providers)
 router: Router = build_router()
 # Valid client keys and the per-client rate limiter (tests swap these too)
 api_keys = ApiKeys(config.GATEWAY_API_KEYS)
 limiter: RateLimiter = build_limiter()
+# Caches (None = turned off in config; tests swap these too)
+exact_cache: ExactCache | None = build_exact_cache()
+semantic_cache: SemanticCache | None = build_semantic_cache()
 if not len(api_keys):
     logger.warning("No GATEWAY_API_KEYS set: every /chat request will be rejected with 401")
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    if semantic_cache is not None:
+        await semantic_cache.embed("warm up")  # load the model now, not during the first request
     yield  # the server runs while we are "paused" here
     await router.aclose()  # on shutdown: close the providers' shared network connections
     await limiter.aclose()
+    if exact_cache is not None:
+        await exact_cache.aclose()
 
 
 app = FastAPI(title="LLM Gateway", lifespan=lifespan)
@@ -143,9 +177,50 @@ async def rate_limited_client(response: Response, x_api_key: str | None = Header
     return client_id
 
 
+def cache_hit_response(kind: str, answer: CachedAnswer, start: float, similarity: float | None = None) -> dict:
+    latency = (time.perf_counter() - start) * 1000
+    request_log.log_cache_hit(kind, answer.provider, answer.model, latency, answer.cost_usd)
+    body = {
+        "answer": answer.text,
+        "provider": answer.provider,  # who originally answered
+        "model": answer.model,
+        "latency_ms": round(latency, 1),
+        "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},  # nothing new was used
+        "cost_usd": 0,
+        "cache": kind,
+        "saved_usd": None if answer.cost_usd is None else round(answer.cost_usd, COST_DECIMALS),
+    }
+    if similarity is not None:
+        body["similarity"] = round(similarity, 4)
+    return body
+
+
+async def semantic_vector(prompt: str):
+    """Embed the prompt for the semantic cache; any embedding failure just skips that cache."""
+    if semantic_cache is None:
+        return None
+    try:
+        return await semantic_cache.embed(prompt)
+    except Exception:
+        logger.exception("Embedding failed; skipping the semantic cache for this request")
+        return None
+
+
 @app.post("/chat")
 async def chat(req: ChatRequest, client_id: str = Depends(rate_limited_client)) -> dict:
     start = time.perf_counter()
+
+    if exact_cache is not None:
+        cached = await exact_cache.get(req.prompt)
+        if cached is not None:
+            return cache_hit_response("exact", cached, start)
+
+    vector = await semantic_vector(req.prompt)
+    if vector is not None:
+        hit: SemanticHit | None = semantic_cache.lookup(vector)
+        if hit is not None:
+            return cache_hit_response("semantic", hit.answer, start, hit.similarity)
+
     try:
         result = await router.chat(req.prompt)
     except AllProvidersFailed as e:
@@ -153,6 +228,14 @@ async def chat(req: ChatRequest, client_id: str = Depends(rate_limited_client)) 
 
     latency = (time.perf_counter() - start) * 1000
     cost = estimate_cost(result.model, result.prompt_tokens, result.completion_tokens, config.MODEL_PRICES)
+
+    if result.complete:  # never reuse a cut-off or filtered answer
+        answer = CachedAnswer.from_response(result, cost)
+        if exact_cache is not None:
+            await exact_cache.set(req.prompt, answer)
+        if vector is not None:
+            semantic_cache.add(vector, answer)
+
     return {
         "answer": result.text,
         "provider": result.provider,
@@ -164,6 +247,7 @@ async def chat(req: ChatRequest, client_id: str = Depends(rate_limited_client)) 
             "total_tokens": result.prompt_tokens + result.completion_tokens,
         },
         "cost_usd": None if cost is None else round(cost, COST_DECIMALS),  # None = model has no price in config
+        "cache": None,
     }
 
 

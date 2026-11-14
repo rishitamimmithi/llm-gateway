@@ -20,6 +20,9 @@ class ProviderResponse:
     model: str
     prompt_tokens: int
     completion_tokens: int
+    # False when the model did not finish normally (hit the token limit, safety filter, ...):
+    # the answer is still returned to the client but never cached.
+    complete: bool = True
 
 
 class ProviderError(Exception):

@@ -25,6 +25,9 @@ class RequestLog:
         columns = {row[1] for row in self.db.execute("PRAGMA table_info(requests)")}
         if "cost_usd" not in columns:
             self.db.execute("ALTER TABLE requests ADD COLUMN cost_usd REAL")
+        # Cache hits store what the provider call WOULD have cost in saved_usd (NULL for other rows).
+        if "saved_usd" not in columns:
+            self.db.execute("ALTER TABLE requests ADD COLUMN saved_usd REAL")
         self.db.commit()
 
     def log(
@@ -44,6 +47,34 @@ class RequestLog:
             (time.time(), provider, model, prompt_tokens, completion_tokens, latency_ms, status, cost_usd),
         )
         self.db.commit()
+
+    def log_cache_hit(
+        self, kind: str, provider: str, model: str, latency_ms: float, saved_usd: float | None
+    ) -> None:
+        """A request answered from the cache: no tokens, no cost, status cache_exact / cache_semantic."""
+        self.db.execute(
+            "INSERT INTO requests (ts, provider, model, prompt_tokens, completion_tokens, latency_ms, status, "
+            "cost_usd, saved_usd) VALUES (?, ?, ?, 0, 0, ?, ?, 0, ?)",
+            (time.time(), provider, model, latency_ms, f"cache_{kind}", saved_usd),
+        )
+        self.db.commit()
+
+    def cache_stats(self) -> dict:
+        """Misses = requests a provider answered (status ok); hits = requests the cache answered."""
+        misses, exact, semantic, saved, unpriced = self.db.execute(
+            "SELECT SUM(status = 'ok'), SUM(status = 'cache_exact'), SUM(status = 'cache_semantic'), "
+            "SUM(saved_usd), SUM(status IN ('cache_exact', 'cache_semantic') AND saved_usd IS NULL) FROM requests"
+        ).fetchone()
+        misses, exact, semantic = misses or 0, exact or 0, semantic or 0
+        total = misses + exact + semantic
+        return {
+            "exact_hits": exact,
+            "semantic_hits": semantic,
+            "misses": misses,
+            "hit_rate": round((exact + semantic) / total, 4) if total else 0,
+            "saved_usd": round(saved or 0, COST_DECIMALS),
+            "unpriced_hits": unpriced or 0,  # hits whose original model had no price
+        }
 
     def stats(self) -> dict:
         row = self.db.execute(
@@ -71,6 +102,7 @@ class RequestLog:
             "total_cost_usd": round(row[3] or 0, COST_DECIMALS),
             "unpriced_requests": row[4] or 0,  # model missing in MODEL_PRICES, or logged before cost tracking
             "by_provider": by_provider,
+            "cache": self.cache_stats(),
         }
 
     def close(self) -> None:

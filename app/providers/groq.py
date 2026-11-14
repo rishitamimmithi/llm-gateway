@@ -52,6 +52,9 @@ class GroqProvider(Provider):
             usage = data.get("usage") or {}
             prompt_tokens = to_count(usage.get("prompt_tokens"))
             completion_tokens = to_count(usage.get("completion_tokens"))
+            # Only a normal "stop" counts as complete: "length" = cut off, "content_filter" = filtered.
+            # A missing finish_reason is treated as complete (some compatible APIs leave it out).
+            complete = data["choices"][0].get("finish_reason") in ("stop", None)
         except (ValueError, KeyError, IndexError, TypeError, AttributeError) as e:
             # A success code with a broken body is unexpected; retrying the same call is unlikely to fix it.
             # status_code=None: it's the provider's fault, so it counts in the circuit breaker.
@@ -63,6 +66,7 @@ class GroqProvider(Provider):
             model=self.model,
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
+            complete=complete,
         )
 
     async def aclose(self) -> None:

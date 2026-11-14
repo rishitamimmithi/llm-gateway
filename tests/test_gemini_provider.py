@@ -266,3 +266,13 @@ async def test_error_messages_never_contain_the_api_key(make_provider):
     error = await chat_error(make_provider(handler))
     assert FAKE_KEY not in str(error)
     assert "***" in str(error)
+
+
+# ---------- cut-off answers ----------
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("finish, complete", [("STOP", True), ("MAX_TOKENS", False), ("SAFETY", False)])
+async def test_only_stop_answer_is_marked_complete(make_provider, finish, complete):
+    result = await make_provider(respond(200, answer("partial", finish=finish))).chat("hi")
+    assert result.text == "partial"
+    assert result.complete is complete

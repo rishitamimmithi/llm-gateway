@@ -83,14 +83,14 @@ class GeminiProvider(Provider):
             reason = candidate.get("finishReason", "UNKNOWN")  # e.g. SAFETY, RECITATION, MAX_TOKENS
             raise ProviderError(self.name, f"no text in answer (finishReason={reason})", retryable=False, status_code=200)
 
-        # Known limitation: if finishReason is MAX_TOKENS, `text` is a cut-off answer but is still
-        # returned as a success (Groq behaves the same). Revisit before caching answers in Phase 4.
+        # Anything but STOP (MAX_TOKENS, SAFETY, RECITATION, ...) is returned but flagged so it is never cached.
         return ProviderResponse(
             text=text,
             provider=self.name,
             model=self.model,
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
+            complete=candidate.get("finishReason") == "STOP",
         )
 
     async def aclose(self) -> None:

@@ -76,6 +76,9 @@ def test_stats_empty_database(client):
         "total_cost_usd": 0,
         "unpriced_requests": 0,
         "by_provider": {},
+        "cache": {
+            "exact_hits": 0, "semantic_hits": 0, "misses": 0, "hit_rate": 0, "saved_usd": 0, "unpriced_hits": 0
+        },
     }
 
 

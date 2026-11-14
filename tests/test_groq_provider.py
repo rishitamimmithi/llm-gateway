@@ -229,3 +229,18 @@ def test_is_retryable_status(status, expected):
 )
 def test_parse_retry_after(header, expected):
     assert parse_retry_after(header) == expected
+
+
+# ---------- cut-off answers ----------
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "finish, complete", [("stop", True), (None, True), ("length", False), ("content_filter", False)]
+)
+async def test_only_normal_stop_is_marked_complete(make_provider, finish, complete):
+    body = ok_body("partial")
+    if finish is not None:
+        body["choices"][0]["finish_reason"] = finish
+    result = await make_provider(lambda request: httpx.Response(200, json=body)).chat("hi")
+    assert result.text == "partial"
+    assert result.complete is complete

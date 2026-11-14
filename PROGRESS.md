@@ -3,7 +3,7 @@
 Updated at the end of every work session.
 
 ## Current phase
-Phase 3 — Rate limiting (done; 259 tests pass). Next: Phase 4 caching.
+Phase 4 — Caching (built; 328 tests pass). Left for done: measure money saved on real traffic and put it in the README.
 
 ## Done
 - Phase 1 complete: proxy runs, requests logged, `/stats` matches the database, pushed with `.env` excluded
@@ -19,6 +19,11 @@ Phase 3 — Rate limiting (done; 259 tests pass). Next: Phase 4 caching.
 - Phase 2 Step 9: failover demo with a wrong Groq key: 6/6 requests answered (HTTP 200) by Gemini, Groq breaker went OPEN, a HALF_OPEN trial failed and re-opened it, key never appeared in the server log
 - Phase 2 verified: both "done" criteria met (fallback with zero failed requests; tests for every breaker state transition), 204 tests pass
 - Phase 3: client API keys (`X-API-Key`, 401), token bucket + sliding window limiters (in memory and Redis/Lua), 429 with `Retry-After` and `X-RateLimit-Remaining`, burst behaviour and comparison in NOTES.md
+- Phase 4 Step 1: own LRU cache with TTL (`app/core/lru_cache.py`), 21 tests
+- Phase 4 Step 2: exact cache (memory LRU or Redis, fail open, 5 s skip after a Redis error); providers mark answers `complete` only on a normal stop, others are never cached
+- Phase 4 Step 3: `/chat` checks exact → semantic → providers; hits logged as `cache_exact` / `cache_semantic` with `saved_usd`; `/stats` has a `cache` section (hits, misses, hit rate, money saved)
+- Phase 4 Step 4: semantic cache (`all-MiniLM-L6-v2`, numpy matrix, cosine threshold 0.94, off by default, one embedding at a time)
+- Phase 4 Step 5: false-hit test set (123 pairs: 50 same, 73 look-alike) + `python -m eval.false_hit_eval`; results in `eval/results.md` and README. At 0.90: 78% hits / 33% false hits; at 0.94: 60% / 22%. Direction swaps ("5 miles to km" vs "5 km to miles") score 0.99+, so a threshold alone can't stop them
 
 ## In progress
 - Nothing
@@ -30,12 +35,15 @@ Phase 3 — Rate limiting (done; 259 tests pass). Next: Phase 4 caching.
 - Rate-limited (429) requests are not logged to the database yet
 - Ollama provider from the Phase 2 list is not built yet (not needed for the done criteria)
 - Failed attempts are logged with 0 tokens / $0, though a provider may bill a request that failed late
-- MAX_TOKENS (cut-off) answers count as success; revisit before caching in Phase 4
+- Semantic cache gives wrong answers for swapped-direction / negated / changed-number questions (seen live: "Convert 10 INR to USD" got the USD→INR answer at 0.957)
+- `/stats` hit rate counts every old `ok` row as a miss, so use a fresh `requests.db` when measuring
+- Caches are shared across client keys (fine while all clients are mine)
+- `matplotlib` not installed, so `eval/tradeoff.png` isn't drawn yet
 
 ## Next steps
-1. Add `GATEWAY_API_KEYS` to `.env`, try `/chat` with and without the header
-2. Optional: run a real Redis (Docker / WSL) and set `REDIS_URL` to check two gateway instances share one limit
-3. Start Phase 4: own LRU cache with TTL
+1. Add a "guard" before semantic hits: no hit if the two prompts have different numbers, negation words, or the same words in a different order around "to/from"; re-run the eval and compare false hits
+2. Measure money saved: replay a realistic prompt mix (with repeats) through the gateway with a fresh `requests.db`, record hit rate and `saved_usd` in the README (Phase 4 done criteria)
+3. Phase 5: request deduplication (in-flight futures map), then consistent hashing
 
 ## To learn later
 - `app/config.py` — settings in one place; checking numbers at startup
@@ -55,17 +63,24 @@ Phase 3 — Rate limiting (done; 259 tests pass). Next: Phase 4 caching.
 - `app/core/sliding_window.py` — log of timestamps; max N in any T seconds; no edge double burst
 - `app/core/redis_limiters.py` — Lua script = atomic check across instances; Redis TIME; key expiry; fail open
 - `app/main.py` — FastAPI dependency for auth + limit; 429 + Retry-After
+- `app/core/lru_cache.py` — hash map + doubly linked list; dummy head/tail; O(1) get/set/evict; lazy TTL expiry
+- `app/cache/exact.py` — cache key = hash of normalised prompt; Redis `SET PX`; fail open + skip Redis after an error
+- `app/cache/semantic.py` — embeddings; cosine similarity = dot product of unit vectors; threshold; one matrix multiply per lookup
+- `eval/false_hit_eval.py` — hit rate vs false-hit rate vs threshold; why embeddings miss word order and negation
+- `app/providers/*` — finish reasons; only cache complete answers
 
 ## To rebuild myself later
 - `app/core/retry.py` — retry with exponential backoff and jitter
 - `app/core/circuit_breaker.py` — circuit breaker state machine
 - `app/core/token_bucket.py` — token bucket rate limiter
 - `app/core/sliding_window.py` — sliding window log rate limiter
+- `app/core/lru_cache.py` — LRU cache with TTL
 
 ## Improvement ideas
 - Log one row per attempt (attempt number, error type) instead of one per request
 - Return 504 for timeouts instead of 502
 - Compute cost once per request (now priced in both the log callback and `/chat`)
+- Semantic guard or a small cross-encoder re-check for hits close to the threshold, to cut false hits without losing paraphrase hits
 
 ## Interview practice questions
 - Token bucket with capacity 10, refill 0.2/s: a client sends 15 requests at once. How many pass, and when can it send the next?
@@ -73,6 +88,9 @@ Phase 3 — Rate limiting (done; 259 tests pass). Next: Phase 4 caching.
 - Two gateway instances share a Redis limit. Why use a Lua script instead of GET then SET?
 - Walk through what happens to 10 requests when Groq's key is wrong: which ones touch Groq, and why?
 - Why does the breaker sit outside the retry loop instead of inside it?
+- Why does an LRU cache need a doubly linked list and not just a dict? What does each one give you?
+- Your semantic cache returned the USD→INR answer for "convert 10 INR to USD". Why does that happen, and how would you stop it?
+- Why is a cut-off (MAX_TOKENS) answer returned to the client but not cached?
 - Why store an unknown price as NULL instead of 0?
 
 ## Session log
@@ -81,3 +99,4 @@ Phase 3 — Rate limiting (done; 259 tests pass). Next: Phase 4 caching.
 | 2026-11-14 | Finished Phase 1; Phase 2 Steps 0–4 (app/ layout, Groq + Gemini providers, retries) |
 | 2026-11-14 | Phase 2 Steps 5–9: circuit breaker, router with fallback, cost tracking, failover demo; Phase 2 done |
 | 2026-11-14 | Phase 3: API keys, token bucket, sliding window, Redis (Lua) versions, 429 + Retry-After |
+| 2026-11-14 | Phase 4: LRU + TTL, exact cache (memory / Redis), semantic cache, false-hit eval (123 pairs) |

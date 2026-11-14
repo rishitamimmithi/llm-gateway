@@ -26,6 +26,15 @@ def read_number(name: str, default: str, *, cast: type = float, allow_zero: bool
         raise ValueError(f"{name} must be a {kind} number, got {raw!r}")
     return value
 
+
+def read_bool(name: str, default: str) -> bool:
+    raw = os.getenv(name, default).strip().lower()
+    if raw in ("1", "true", "yes", "on"):
+        return True
+    if raw in ("0", "false", "no", "off"):
+        return False
+    raise ValueError(f"{name} must be true or false, got {raw!r}")
+
 # --- Groq provider ---
 GROQ_API_KEY: str | None = os.getenv("GROQ_API_KEY")
 GROQ_URL: str = "https://api.groq.com/openai/v1/chat/completions"
@@ -80,6 +89,19 @@ SLIDING_WINDOW_LIMIT: int = read_number("SLIDING_WINDOW_LIMIT", "12", cast=int)
 SLIDING_WINDOW_SECONDS: float = read_number("SLIDING_WINDOW_SECONDS", "60")
 # Empty = limits kept in this process's memory. Set (e.g. redis://localhost:6379/0) to share limits across instances.
 REDIS_URL: str = os.getenv("REDIS_URL", "").strip()
+
+# --- Caching (Redis is used for the exact cache too when REDIS_URL is set) ---
+EXACT_CACHE_ENABLED: bool = read_bool("EXACT_CACHE_ENABLED", "true")
+CACHE_TTL_SECONDS: float = read_number("CACHE_TTL_SECONDS", "3600")  # how long an answer may be reused
+CACHE_MAX_ENTRIES: int = read_number("CACHE_MAX_ENTRIES", "1000", cast=int)  # per cache, in memory
+# Semantic cache is off by default: it needs sentence-transformers (pip install -r requirements-semantic.txt)
+SEMANTIC_CACHE_ENABLED: bool = read_bool("SEMANTIC_CACHE_ENABLED", "false")
+EMBEDDING_MODEL: str = os.getenv("EMBEDDING_MODEL", "sentence-transformers/all-MiniLM-L6-v2")
+# Cosine similarity needed to reuse an answer. Higher = fewer wrong answers, fewer hits.
+# 0.94 from eval/results.md: ~60% of paraphrases hit, ~22% of tricky look-alike questions wrongly hit.
+SEMANTIC_CACHE_THRESHOLD: float = read_number("SEMANTIC_CACHE_THRESHOLD", "0.94")
+if SEMANTIC_CACHE_THRESHOLD > 1:
+    raise ValueError(f"SEMANTIC_CACHE_THRESHOLD must be at most 1, got {SEMANTIC_CACHE_THRESHOLD}")
 
 # --- Database ---
 DB_PATH: str = os.getenv("DB_PATH", "requests.db")
