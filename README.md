@@ -2,6 +2,10 @@
 
 [![tests](https://github.com/rishitamimmithi/llm-gateway/actions/workflows/tests.yml/badge.svg)](https://github.com/rishitamimmithi/llm-gateway/actions/workflows/tests.yml)
 
+**Live demo:** [llm-gateway-9rfs.onrender.com](https://llm-gateway-9rfs.onrender.com) (dashboard) ·
+[API docs](https://llm-gateway-9rfs.onrender.com/docs). It runs on a free instance that sleeps when idle, so the
+first load can take about a minute to wake up. `/chat` needs an API key (`X-API-Key`).
+
 A backend service that sits between apps and LLM providers (Groq, Gemini). Apps call the gateway instead of the
 provider, and the gateway adds caching, rate limiting, failover, request deduplication, cost tracking and a live dashboard.
 
