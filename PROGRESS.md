@@ -3,7 +3,7 @@
 Updated at the end of every work session.
 
 ## Current phase
-Phase 6 — React dashboard (built; shows live data from the stats API). Phase 4 still needs money saved on real traffic in the README.
+Phase 7 — prove it (plan approved: fake provider + Locust, Docker, CI, README). Phases 1–6 done.
 
 ## Done
 - Phase 1 complete: proxy runs, requests logged, `/stats` matches the database, pushed with `.env` excluded
@@ -34,6 +34,7 @@ Phase 6 — React dashboard (built; shows live data from the stats API). Phase 4
 - Phase 6 Step 2: React dashboard (`dashboard/`, Vite + recharts): 6 stat tiles, requests / latency / cost charts with tooltips, provider circuit table (colour + icon + word), data table, 15 min–24 h ranges, light + dark mode, 5 s refresh; checked against a running gateway with 400 seeded requests
 - Phase 6 review fixes: one poll at a time (next scheduled after the last finishes), range change aborts the old request, index on `requests.ts`, oldest bucket no longer cut short, NULL status / latency rows don't crash; latency points visible when traffic is sparse, `bucket` longer than the window rejected (422), "spent" counts only provider answers (same as `/stats`)
 - Phase 6 verified: 409 tests pass, dashboard builds, a row added while the gateway runs shows up in the dashboard API and charts
+- Phase 4 money saved: `loadtest/savings_replay.py` + `loadtest/prompt_mix.json`, 300 requests against real Groq: 86 provider calls, 158 exact + 56 semantic hits (71.3%), 0 wrong semantic hits seen, cost cut 75.1% ($0.0135 spent, $0.0408 saved); in README. Phase 4 done
 
 ## In progress
 - Nothing
@@ -46,6 +47,7 @@ Phase 6 — React dashboard (built; shows live data from the stats API). Phase 4
 - Dashboard "Requests" tile can't show client requests that failed on every provider (only per-attempt `error` rows exist); log one `failed` row per 503 before Phase 7
 - Dashboard: if one of the three stats calls fails, the whole refresh is skipped and the banner says the gateway is unreachable
 - Rate-limited (429) requests are not logged to the database yet
+- First replay stalled: one Groq call logged 1340 s although each attempt has a 10 s total deadline (most likely the laptop slept mid-run; re-run was clean). Worth a look if it shows up again
 - Ollama provider from the Phase 2 list is not built yet (not needed for the done criteria)
 - Failed attempts are logged with 0 tokens / $0, though a provider may bill a request that failed late
 - Guard still lets through antonyms ("healthy"/"unhealthy", "most"/"least"), swapped numbers ("12 divided by 4" vs "4 divided by 12") and similar names (Slovakia/Slovenia)
@@ -58,9 +60,9 @@ Phase 6 — React dashboard (built; shows live data from the stats API). Phase 4
 - `matplotlib` not installed, so `eval/tradeoff.png` isn't drawn yet
 
 ## Next steps
-1. Measure money saved: replay a realistic prompt mix (with repeats) through the gateway with a fresh `requests.db`, record hit rate and `saved_usd` in the README (Phase 4 done criteria) — the dashboard will show it live
-2. Phase 7: Locust load test (req/s, p50/p95/p99, with and without cache), then Dockerfile + docker-compose (gateway + Redis + dashboard build)
-3. Add a dashboard screenshot to the README
+1. Phase 7 step 1–2: fake provider (`PROVIDER_ORDER=fake`) + Locust load test (req/s, p50/p95/p99, error rate; cache off / exact / exact + semantic)
+2. Phase 7 step 3–4: Dockerfile + docker-compose (gateway + Redis + dashboard via nginx), GitHub Actions (pytest + dashboard build)
+3. Phase 7 step 5: README with Mermaid architecture diagram, dashboard screenshot, filled resume bullet
 4. Optional: remove "last" from the guard's number words, then write a fresh hold-out set before re-measuring
 
 ## To learn later
@@ -94,6 +96,7 @@ Phase 6 — React dashboard (built; shows live data from the stats API). Phase 4
 - `app/db/logger.py` `timeseries` — time buckets; nearest-rank percentile (p50/p95/p99); why averages hide slow requests
 - `dashboard/src/App.jsx` — React state + effect; polling with `setInterval` and cleanup; Vite dev proxy instead of CORS
 - `dashboard/src/Charts.jsx` — recharts stacked bars and lines; one y-axis per chart; tooltips and legends
+- `loadtest/savings_replay.py` — Zipf-shaped traffic; hit rate and cost cut depend on how repetitive traffic is; seeded randomness for repeatable runs
 
 ## To rebuild myself later
 - `app/core/retry.py` — retry with exponential backoff and jitter
@@ -110,6 +113,7 @@ Phase 6 — React dashboard (built; shows live data from the stats API). Phase 4
 - Compute cost once per request (now priced in both the log callback and `/chat`)
 - Cross-instance dedup: Redis `SET NX` lock per prompt + pub/sub to hand the answer to other instances
 - Small cross-encoder re-check for semantic hits, to catch antonyms the guard misses
+- Re-run the savings replay with `--zipf 0.6` and `--zipf 1.4` to show how hit rate changes with traffic shape
 - `/stats/timeseries`: count per bucket in SQL (`GROUP BY`) and pull only `ok` latencies into Python, for 1M+ row tables
 
 ## Interview practice questions
@@ -128,6 +132,8 @@ Phase 6 — React dashboard (built; shows live data from the stats API). Phase 4
 - Going from 3 to 4 cache nodes, why does `hash % N` move ~75% of keys while a hash ring moves ~25%? What do virtual nodes fix?
 - Why show p95 latency instead of the average? Why are cache hits left out of the latency chart?
 - Your dashboard polls every 5 s with `setInterval`, and the gateway gets slow. What goes wrong, and how does "schedule the next poll after this one finishes" fix it?
+- Your cache cut cost by 75% on the replay. Why might it be much lower in production, and what traffic shape would you need to know?
+- Why was the replay sent one request at a time instead of all at once?
 - The stats query filters on `ts` every few seconds. What does an index on `ts` change, and what does it cost on every insert?
 
 ## Session log
@@ -140,3 +146,4 @@ Phase 6 — React dashboard (built; shows live data from the stats API). Phase 4
 | 2026-11-14 | Phase 5: request dedup, consistent hash ring, sharded exact cache, burst + key-movement demos |
 | 2026-11-14 | Semantic guard (numbers, negation, direction); false hits 22% → 3% at 0.94; 30-pair hold-out set |
 | 2026-11-14 | Phase 6: `/stats/timeseries` endpoint + React dashboard (requests, latency p50/p95, cost, breaker states) |
+| 2026-11-14 | Money saved on a 300-request replay (71.3% hits, 75.1% cost cut); Phase 4 done; Phase 7 planned |

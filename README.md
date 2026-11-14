@@ -21,7 +21,7 @@ provider fallback and cost tracking.
 - [x] Step 1: basic proxy with logging
 - [x] Step 2: second provider, fallback, circuit breaker
 - [x] Step 3: per-key rate limiting (token bucket or sliding window, optional Redis)
-- [~] Step 4: exact cache (done), semantic cache + false-hit test set (done); money saved on real traffic still to measure
+- [x] Step 4: exact cache, semantic cache, false-hit test set, money saved on a realistic prompt mix
 - [x] Step 5: request deduplication + consistent hashing for cache nodes
 - [x] Step 6: React dashboard
 - [ ] Step 7: load testing, Docker, deployment
@@ -57,6 +57,23 @@ What still gets through: antonyms ("healthy" vs "unhealthy", "most" vs "least"),
 
 Embedding similarity alone can't tell "convert 5 miles to km" from "convert 5 km to miles" (similarity 0.99), so the
 look-alike set is a stress test: real traffic has far fewer near-misses, but these are exactly the wrong answers a cache must not give.
+
+### Money saved on a realistic prompt mix
+300 requests replayed one at a time through the gateway (real Groq `openai/gpt-oss-20b` calls, exact + semantic cache
+at 0.94 with the guard, fresh database). The mix (`loadtest/prompt_mix.json`): 30 popular questions asked with a
+Zipf-like popularity (the top one ~19% of traffic) in 3 different wordings, 8 look-alikes of popular questions
+("Convert 10 INR to USD" next to "Convert 10 USD to INR"), and 30 one-off questions asked once.
+Run `python -m loadtest.savings_replay --url http://localhost:8000 --key <client key>`.
+
+| requests | provider calls | exact hits | semantic hits | hit rate | wrong semantic hits | spent USD | saved USD | cost cut |
+|---|---|---|---|---|---|---|---|---|
+| 300 | 86 | 158 | 56 | 71.3% | 0 | 0.0135 | 0.0408 | 75.1% |
+
+- 104 different prompts were sent but only 86 reached a provider: 18 paraphrases were answered by the semantic cache the first time they appeared.
+- All 7 look-alikes that came up went to the provider the first time (no wrong answer). "Wrong semantic hits" only
+  counts hits for a question that was never answered before, so it's a lower bound, not a full false-hit check (that's the eval above).
+- The mix is synthetic: the hit rate depends on how repetitive the traffic is. A support bot with a few FAQs will look like this;
+  a coding assistant with mostly unique prompts will see far fewer hits. Dollar amounts are tiny because the model is cheap; the % is what carries over.
 
 ## Request deduplication
 If identical prompts (extra spaces ignored) arrive while one is already waiting on a provider, they all share
