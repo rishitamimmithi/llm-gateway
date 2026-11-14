@@ -3,7 +3,7 @@
 Updated at the end of every work session.
 
 ## Current phase
-Phase 5 — Dedup + consistent hashing (built; 393 tests pass; both done criteria shown by `loadtest/dedup_burst.py` and `eval/ring_moves.py`). Phase 4 still needs money saved on real traffic in the README.
+Phase 6 — React dashboard (built; shows live data from the stats API). Phase 4 still needs money saved on real traffic in the README.
 
 ## Done
 - Phase 1 complete: proxy runs, requests logged, `/stats` matches the database, pushed with `.env` excluded
@@ -30,6 +30,10 @@ Phase 5 — Dedup + consistent hashing (built; 393 tests pass; both done criteri
 - Phase 5 Step 2: consistent hash ring (`app/core/consistent_hash.py`, MD5, 100 virtual nodes) + sharded exact cache over several Redis nodes (`app/cache/sharded.py`, `CACHE_NODES`)
 - Phase 5 proof: 50 identical requests → 1 provider call (49 shared, same p95); adding a 4th node moves 24.1% of keys vs 74.9% with `hash % N`
 - Phase 5 review fixes: wait for shared calls at shutdown, caching errors after a paid answer fail open, exact cache re-checked before calling providers, cache node names without passwords, repeated `CACHE_NODES` dropped
+- Phase 6 Step 1: `GET /stats/timeseries?minutes=&bucket=` — per-bucket provider answers, cache hits, dedup, failed attempts, p50/p95 latency, spent and saved; overall p50/p95/p99 (422 for bad ranges or > 2000 buckets)
+- Phase 6 Step 2: React dashboard (`dashboard/`, Vite + recharts): 6 stat tiles, requests / latency / cost charts with tooltips, provider circuit table (colour + icon + word), data table, 15 min–24 h ranges, light + dark mode, 5 s refresh; checked against a running gateway with 400 seeded requests
+- Phase 6 review fixes: one poll at a time (next scheduled after the last finishes), range change aborts the old request, index on `requests.ts`, oldest bucket no longer cut short, NULL status / latency rows don't crash; latency points visible when traffic is sparse, `bucket` longer than the window rejected (422), "spent" counts only provider answers (same as `/stats`)
+- Phase 6 verified: 409 tests pass, dashboard builds, a row added while the gateway runs shows up in the dashboard API and charts
 
 ## In progress
 - Nothing
@@ -37,7 +41,10 @@ Phase 5 — Dedup + consistent hashing (built; 393 tests pass; both done criteri
 ## Open bugs / questions
 - Gemini free tier is slow and unpredictable (1–22 s for tiny answers, one 30 s timeout)
 - Fallback through slow Gemini took 7–24 s per request in the demo (timeouts are retried up to 3 × 10 s)
-- `/stats` and `/health` need no API key yet (fine locally; lock down before deploying)
+- `/stats`, `/stats/timeseries` and `/health` need no API key yet (fine locally; lock down before deploying)
+- One SQLite connection is shared by the event loop (logging) and threadpool handlers (stats); may need a lock or a separate read connection under Locust load
+- Dashboard "Requests" tile can't show client requests that failed on every provider (only per-attempt `error` rows exist); log one `failed` row per 503 before Phase 7
+- Dashboard: if one of the three stats calls fails, the whole refresh is skipped and the banner says the gateway is unreachable
 - Rate-limited (429) requests are not logged to the database yet
 - Ollama provider from the Phase 2 list is not built yet (not needed for the done criteria)
 - Failed attempts are logged with 0 tokens / $0, though a provider may bill a request that failed late
@@ -51,9 +58,10 @@ Phase 5 — Dedup + consistent hashing (built; 393 tests pass; both done criteri
 - `matplotlib` not installed, so `eval/tradeoff.png` isn't drawn yet
 
 ## Next steps
-1. Measure money saved: replay a realistic prompt mix (with repeats) through the gateway with a fresh `requests.db`, record hit rate and `saved_usd` in the README (Phase 4 done criteria)
-2. Phase 6: React dashboard (requests over time, p50/p95, cost, cache hit rate, breaker states); first add a stats endpoint for time series and breaker state
-3. Optional: remove "last" from the guard's number words, then write a fresh hold-out set before re-measuring
+1. Measure money saved: replay a realistic prompt mix (with repeats) through the gateway with a fresh `requests.db`, record hit rate and `saved_usd` in the README (Phase 4 done criteria) — the dashboard will show it live
+2. Phase 7: Locust load test (req/s, p50/p95/p99, with and without cache), then Dockerfile + docker-compose (gateway + Redis + dashboard build)
+3. Add a dashboard screenshot to the README
+4. Optional: remove "last" from the guard's number words, then write a fresh hold-out set before re-measuring
 
 ## To learn later
 - `app/config.py` — settings in one place; checking numbers at startup
@@ -83,6 +91,9 @@ Phase 5 — Dedup + consistent hashing (built; 393 tests pass; both done criteri
 - `app/core/consistent_hash.py` — hash ring; virtual nodes; binary search with wrap-round; why `hash % N` moves most keys
 - `app/cache/sharded.py` — routing cache keys to nodes; moved keys just miss once
 - `loadtest/dedup_burst.py` / `eval/ring_moves.py` — proving dedup and key movement with numbers
+- `app/db/logger.py` `timeseries` — time buckets; nearest-rank percentile (p50/p95/p99); why averages hide slow requests
+- `dashboard/src/App.jsx` — React state + effect; polling with `setInterval` and cleanup; Vite dev proxy instead of CORS
+- `dashboard/src/Charts.jsx` — recharts stacked bars and lines; one y-axis per chart; tooltips and legends
 
 ## To rebuild myself later
 - `app/core/retry.py` — retry with exponential backoff and jitter
@@ -99,6 +110,7 @@ Phase 5 — Dedup + consistent hashing (built; 393 tests pass; both done criteri
 - Compute cost once per request (now priced in both the log callback and `/chat`)
 - Cross-instance dedup: Redis `SET NX` lock per prompt + pub/sub to hand the answer to other instances
 - Small cross-encoder re-check for semantic hits, to catch antonyms the guard misses
+- `/stats/timeseries`: count per bucket in SQL (`GROUP BY`) and pull only `ok` latencies into Python, for 1M+ row tables
 
 ## Interview practice questions
 - Token bucket with capacity 10, refill 0.2/s: a client sends 15 requests at once. How many pass, and when can it send the next?
@@ -114,6 +126,9 @@ Phase 5 — Dedup + consistent hashing (built; 393 tests pass; both done criteri
 - 50 identical prompts arrive at once and the provider is down. How many provider calls happen with and without dedup, and why does sharing the error matter?
 - Why does each waiter await `asyncio.shield(task)` instead of the task itself?
 - Going from 3 to 4 cache nodes, why does `hash % N` move ~75% of keys while a hash ring moves ~25%? What do virtual nodes fix?
+- Why show p95 latency instead of the average? Why are cache hits left out of the latency chart?
+- Your dashboard polls every 5 s with `setInterval`, and the gateway gets slow. What goes wrong, and how does "schedule the next poll after this one finishes" fix it?
+- The stats query filters on `ts` every few seconds. What does an index on `ts` change, and what does it cost on every insert?
 
 ## Session log
 | Date | What we did |
@@ -124,3 +139,4 @@ Phase 5 — Dedup + consistent hashing (built; 393 tests pass; both done criteri
 | 2026-11-14 | Phase 4: LRU + TTL, exact cache (memory / Redis), semantic cache, false-hit eval (123 pairs) |
 | 2026-11-14 | Phase 5: request dedup, consistent hash ring, sharded exact cache, burst + key-movement demos |
 | 2026-11-14 | Semantic guard (numbers, negation, direction); false hits 22% → 3% at 0.94; 30-pair hold-out set |
+| 2026-11-14 | Phase 6: `/stats/timeseries` endpoint + React dashboard (requests, latency p50/p95, cost, breaker states) |

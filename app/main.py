@@ -11,7 +11,7 @@ import time
 from contextlib import asynccontextmanager
 from urllib.parse import urlparse
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Response
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Response
 from pydantic import BaseModel, Field
 from redis.asyncio import Redis
 from redis.asyncio.retry import Retry
@@ -313,3 +313,17 @@ async def chat(req: ChatRequest, client_id: str = Depends(rate_limited_client)) 
 @app.get("/stats")
 def stats() -> dict:
     return request_log.stats()
+
+
+@app.get("/stats/timeseries")
+def stats_timeseries(
+    minutes: int = Query(default=60, ge=1, le=7 * 24 * 60),
+    bucket: int = Query(default=60, ge=10, le=24 * 60 * 60),
+) -> dict:
+    """Requests, errors, cache hits, latency p50/p95 and cost per time bucket (for the dashboard)."""
+    if bucket > minutes * 60:
+        # buckets start on round times, so one huge bucket would reach far back past the window
+        raise HTTPException(status_code=422, detail="bucket must not be longer than the window")
+    if minutes * 60 / bucket > 2000:
+        raise HTTPException(status_code=422, detail="too many buckets: use a bigger bucket or fewer minutes")
+    return request_log.timeseries(minutes, bucket)

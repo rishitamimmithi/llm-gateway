@@ -2,11 +2,21 @@
 Request log: records every request in SQLite and answers stats queries.
 Wrapped in a class so tests can create a throwaway database instead of using requests.db.
 """
+import math
 import sqlite3
 import time
 
 # One small request costs about $0.000001, so fewer decimals would round real costs to 0
 COST_DECIMALS = 10
+
+
+def percentile(sorted_values: list[float], pct: float) -> float | None:
+    """Nearest-rank percentile of an already sorted list (None if empty).
+    p95 = the value that 95% of requests were at or below."""
+    if not sorted_values:
+        return None
+    rank = max(1, math.ceil(pct / 100 * len(sorted_values)))
+    return round(sorted_values[rank - 1], 1)
 
 
 class RequestLog:
@@ -28,6 +38,9 @@ class RequestLog:
         # Cache hits store what the provider call WOULD have cost in saved_usd (NULL for other rows).
         if "saved_usd" not in columns:
             self.db.execute("ALTER TABLE requests ADD COLUMN saved_usd REAL")
+        # The dashboard asks for "rows in the last N minutes" every few seconds: without an index on ts
+        # that is a full table scan each time
+        self.db.execute("CREATE INDEX IF NOT EXISTS idx_requests_ts ON requests(ts)")
         self.db.commit()
 
     def log(
@@ -114,6 +127,54 @@ class RequestLog:
             "unpriced_requests": row[4] or 0,  # model missing in MODEL_PRICES, or logged before cost tracking
             "by_provider": by_provider,
             "cache": self.cache_stats(),
+        }
+
+    def timeseries(self, minutes: int, bucket_seconds: int, now: float | None = None) -> dict:
+        """Requests in the last `minutes`, grouped into time buckets for the dashboard.
+        Latency percentiles are worked out in Python because SQLite has no percentile function."""
+        now = time.time() if now is None else now
+        start = now - minutes * 60
+        first = int(start // bucket_seconds) * bucket_seconds  # line buckets up on round times
+        count = int((now - first) // bucket_seconds) + 1
+        buckets = [
+            {"ts": first + i * bucket_seconds, "ok": 0, "errors": 0, "cache_hits": 0, "deduplicated": 0,
+             "cost_usd": 0.0, "saved_usd": 0.0, "latencies": []}
+            for i in range(count)
+        ]
+        all_latencies: list[float] = []  # provider answers only: they are what the client waits for
+        rows = self.db.execute(
+            # from `first`, not `start`, so the oldest bucket is complete instead of showing a fake dip
+            "SELECT ts, status, latency_ms, cost_usd, saved_usd FROM requests WHERE ts >= ? AND ts <= ?",
+            (first, now),
+        )
+        for ts, status, latency, cost, saved in rows:
+            bucket = buckets[min(int((ts - first) // bucket_seconds), count - 1)]
+            if status == "ok":
+                bucket["ok"] += 1
+                if latency is not None:
+                    bucket["latencies"].append(latency)
+                    all_latencies.append(latency)
+            elif status == "error":
+                bucket["errors"] += 1
+            elif status and status.startswith("cache_"):
+                bucket["cache_hits"] += 1
+            elif status == "dedup":
+                bucket["deduplicated"] += 1
+            if status == "ok":  # same rule as stats(): only provider answers count as spent
+                bucket["cost_usd"] += cost or 0
+            bucket["saved_usd"] += saved or 0
+        for bucket in buckets:
+            latencies = sorted(bucket.pop("latencies"))
+            bucket["p50_ms"] = percentile(latencies, 50)
+            bucket["p95_ms"] = percentile(latencies, 95)
+            bucket["cost_usd"] = round(bucket["cost_usd"], COST_DECIMALS)
+            bucket["saved_usd"] = round(bucket["saved_usd"], COST_DECIMALS)
+        all_latencies.sort()
+        return {
+            "minutes": minutes,
+            "bucket_seconds": bucket_seconds,
+            "latency_ms": {p: percentile(all_latencies, n) for p, n in (("p50", 50), ("p95", 95), ("p99", 99))},
+            "buckets": buckets,
         }
 
     def close(self) -> None:

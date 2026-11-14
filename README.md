@@ -23,7 +23,7 @@ provider fallback and cost tracking.
 - [x] Step 3: per-key rate limiting (token bucket or sliding window, optional Redis)
 - [~] Step 4: exact cache (done), semantic cache + false-hit test set (done); money saved on real traffic still to measure
 - [x] Step 5: request deduplication + consistent hashing for cache nodes
-- [ ] Step 6: React dashboard
+- [x] Step 6: React dashboard
 - [ ] Step 7: load testing, Docker, deployment
 
 ## Caching
@@ -72,6 +72,17 @@ Burst of 50 identical requests, fake provider taking 0.5 s (`python -m loadtest.
 | dedup off | 50 | 50 | 0 | 527 | 549 |
 
 Same latency, 49 fewer provider calls. Against a running gateway: `python -m loadtest.dedup_burst --url http://localhost:8000 --key <client key>`.
+
+## Dashboard
+React (Vite + recharts) app in `dashboard/`, refreshing every 5 s: requests over time (provider answer / cache hit /
+shared / failed), provider latency p50 and p95, money spent vs saved, and each provider's circuit breaker state.
+Time ranges: 15 min, 1 hour, 6 hours, 24 hours.
+
+1. Start the gateway (`uvicorn app.main:app`, port 8000)
+2. `cd dashboard`, `npm install`, `npm run dev`, open http://localhost:5173
+   (gateway on another address: `GATEWAY_URL=http://host:port npm run dev`)
+
+Data comes from `GET /stats`, `GET /stats/timeseries?minutes=60&bucket=60` and `GET /health/providers`.
 
 ## Consistent hashing (sharded exact cache)
 With `CACHE_NODES=redis://host1:6379/0,redis://host2:6379/0` (2+ URLs) the exact cache is split across the Redis
