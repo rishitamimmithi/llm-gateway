@@ -116,6 +116,13 @@ PROMPT_PREVIEW_CHARS: int = read_number(
     "PROMPT_PREVIEW_CHARS", default_prompt_preview_chars(DEPLOY_PUBLIC), cast=int, allow_zero=True
 )
 
+# Demo data: on startup, if the request log is empty, replay DEMO_SEED_REQUESTS prompts from the prompt mix
+# through the fake provider (no network, no cost), spread over the last hour, so a fresh deploy's dashboard
+# isn't blank. The dashboard shows a "Demo data" badge while this is on.
+DEMO_SEED: bool = read_bool("DEMO_SEED", "false")
+DEMO_SEED_REQUESTS: int = read_number("DEMO_SEED_REQUESTS", "150", cast=int)
+DEMO_PROMPTS_FILE: str = os.getenv("DEMO_PROMPTS_FILE", "loadtest/prompt_mix.json")
+
 # Built dashboard (npm run build) served at "/" when the folder exists; the Docker image puts it here
 DASHBOARD_DIR: str = os.getenv("DASHBOARD_DIR", "dashboard/dist")
 

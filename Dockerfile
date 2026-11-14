@@ -31,6 +31,7 @@ RUN pip install --no-cache-dir -r requirements.txt \
     fi
 
 COPY app ./app
+COPY loadtest/prompt_mix.json ./loadtest/prompt_mix.json
 COPY --from=dashboard /dashboard/dist ./dashboard/dist
 
 # Don't run as root; /data holds the SQLite request log (a volume with compose; on Render's free

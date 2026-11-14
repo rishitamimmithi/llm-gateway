@@ -12,5 +12,6 @@ dashboard/node_modules
 dashboard/dist
 tests
 eval
-loadtest
+loadtest/*
+!loadtest/prompt_mix.json
 *.md

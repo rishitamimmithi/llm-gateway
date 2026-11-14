@@ -363,6 +363,14 @@ export default function App() {
             <span className="dot" aria-hidden="true" />
             {status.label}
           </span>
+          {data.summary?.demo_data && (
+            <span
+              className="pill demo"
+              title="Seeded at startup with made-up traffic from the fake provider (no real calls, no cost)"
+            >
+              Demo data
+            </span>
+          )}
         </div>
         <div className="controls">
           <span className="updated">

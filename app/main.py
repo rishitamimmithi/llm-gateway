@@ -5,12 +5,13 @@ semantic cache, and only on a miss sends the prompt through the router (provider
 retries, circuit breakers, fallback). Identical prompts already in flight share that one call.
 Complete answers are stored in both caches.
 """
+import asyncio
 import json
 import logging
 import math
 import os
 import time
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from contextvars import ContextVar
 from urllib.parse import urlparse
 
@@ -23,7 +24,7 @@ from redis.asyncio import Redis
 from redis.asyncio.retry import Retry
 from redis.backoff import NoBackoff
 
-from app import config
+from app import config, demo
 from app.cache.answer import CachedAnswer
 from app.cache.exact import ExactCache, MemoryExactCache, RedisExactCache, cache_key
 from app.cache.sharded import ShardedExactCache
@@ -179,7 +180,24 @@ if not len(api_keys):
 async def lifespan(app: FastAPI):
     if semantic_cache is not None:
         await semantic_cache.embed("warm up")  # load the model now, not during the first request
+    demo_task = None
+    if config.DEMO_SEED:
+        # In the background, so the health check answers straight away
+        demo_task = asyncio.create_task(
+            demo.seed_from_file(
+                request_log,
+                config.DEMO_PROMPTS_FILE,
+                FakeProvider(config.FAKE_MODEL, delay_seconds=0),  # timings are made up, so no waiting
+                n=config.DEMO_SEED_REQUESTS,
+                prices=config.MODEL_PRICES,
+                provider_delay_ms=config.FAKE_DELAY_SECONDS * 1000,
+            )
+        )
     yield  # the server runs while we are "paused" here
+    if demo_task is not None:
+        demo_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await demo_task  # let it stop before the log and connections close
     if inflight is not None:
         await inflight.aclose()  # finish shared provider calls before closing their connections
     await router.aclose()  # on shutdown: close the providers' shared network connections
@@ -462,7 +480,9 @@ async def chat_stream(
 
 @app.get("/stats")
 def stats() -> dict:
-    return request_log.stats()
+    # demo_data: some rows are made-up DEMO_SEED traffic (the dashboard shows a badge). Based on the rows,
+    # not the setting: a persistent database keeps its demo rows after DEMO_SEED is switched off.
+    return {**request_log.stats(), "demo_data": request_log.has_demo_rows()}
 
 
 @app.get("/stats/recent")

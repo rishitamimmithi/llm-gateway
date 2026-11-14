@@ -15,6 +15,10 @@ services:
         value: "true"
       - key: PROVIDER_ORDER
         value: groq,gemini
+      # The disk is wiped on every restart: fill the empty dashboard with fake-provider traffic
+      # (no real calls, no cost; shown with a "Demo data" badge)
+      - key: DEMO_SEED
+        value: "true"
       # No REDIS_URL: rate limits and the exact cache live in memory (one instance on the free plan)
       - key: GATEWAY_API_KEYS
         sync: false

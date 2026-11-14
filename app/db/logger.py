@@ -83,6 +83,9 @@ class RequestLog:
         # A short start of the prompt for the "recent requests" table (NULL when previews are off)
         if "prompt_preview" not in columns:
             self.db.execute("ALTER TABLE requests ADD COLUMN prompt_preview TEXT")
+        # 1 = made-up row from DEMO_SEED, so demo traffic can always be told apart from real traffic
+        if "demo" not in columns:
+            self.db.execute("ALTER TABLE requests ADD COLUMN demo INTEGER NOT NULL DEFAULT 0")
         # The dashboard asks for "rows in the last N minutes" every few seconds: without an index on ts
         # that is a full table scan each time
         self.db.execute("CREATE INDEX IF NOT EXISTS idx_requests_ts ON requests(ts)")
@@ -98,21 +101,31 @@ class RequestLog:
         status: str,
         cost_usd: float | None = None,
         prompt_preview: str | None = None,
+        ts: float | None = None,
+        demo: bool = False,
     ) -> None:
-        """cost_usd=None means "unknown price", which is kept apart from a real 0."""
+        """cost_usd=None means "unknown price", which is kept apart from a real 0.
+        ts: when it happened (default now). demo: a made-up DEMO_SEED row (with a past ts)."""
         self.db.execute(
             "INSERT INTO requests (ts, provider, model, prompt_tokens, completion_tokens, latency_ms, status, "
-            "cost_usd, prompt_preview) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (time.time(), provider, model, prompt_tokens, completion_tokens, latency_ms, status, cost_usd, prompt_preview),
+            "cost_usd, prompt_preview, demo) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (time.time() if ts is None else ts, provider, model, prompt_tokens, completion_tokens, latency_ms,
+             status, cost_usd, prompt_preview, int(demo)),
         )
         self.db.commit()
 
     def log_cache_hit(
         self, kind: str, provider: str, model: str, latency_ms: float, saved_usd: float | None,
-        prompt_preview: str | None = None,
+        prompt_preview: str | None = None, ts: float | None = None, demo: bool = False,
     ) -> None:
         """A request answered from the cache: no tokens, no cost, status cache_exact / cache_semantic."""
-        self._log_saved(f"cache_{kind}", provider, model, latency_ms, saved_usd, prompt_preview)
+        self._log_saved(f"cache_{kind}", provider, model, latency_ms, saved_usd, prompt_preview, ts, demo)
+
+    def is_empty(self) -> bool:
+        return not self.db.execute("SELECT 1 FROM requests LIMIT 1")
+
+    def has_demo_rows(self) -> bool:
+        return bool(self.db.execute("SELECT 1 FROM requests WHERE demo = 1 LIMIT 1"))
 
     def log_deduplicated(
         self, provider: str, model: str, latency_ms: float, saved_usd: float | None, prompt_preview: str | None = None
@@ -122,12 +135,13 @@ class RequestLog:
 
     def _log_saved(
         self, status: str, provider: str, model: str, latency_ms: float, saved_usd: float | None,
-        prompt_preview: str | None,
+        prompt_preview: str | None, ts: float | None = None, demo: bool = False,
     ) -> None:
         self.db.execute(
             "INSERT INTO requests (ts, provider, model, prompt_tokens, completion_tokens, latency_ms, status, "
-            "cost_usd, saved_usd, prompt_preview) VALUES (?, ?, ?, 0, 0, ?, ?, 0, ?, ?)",
-            (time.time(), provider, model, latency_ms, status, saved_usd, prompt_preview),
+            "cost_usd, saved_usd, prompt_preview, demo) VALUES (?, ?, ?, 0, 0, ?, ?, 0, ?, ?, ?)",
+            (time.time() if ts is None else ts, provider, model, latency_ms, status, saved_usd, prompt_preview,
+             int(demo)),
         )
         self.db.commit()
 
@@ -135,12 +149,13 @@ class RequestLog:
         """The newest `limit` rows, newest first, for the dashboard's "recent requests" table."""
         rows = self.db.execute(
             "SELECT id, ts, status, provider, model, prompt_preview, latency_ms, prompt_tokens, completion_tokens, "
-            "cost_usd, saved_usd FROM requests ORDER BY id DESC LIMIT ?",
+            # by time, not id: backdated demo rows can be written after a real request
+            "cost_usd, saved_usd, demo FROM requests ORDER BY ts DESC, id DESC LIMIT ?",
             (limit,),
         )
         names = ("id", "ts", "status", "provider", "model", "prompt_preview", "latency_ms", "prompt_tokens",
-                 "completion_tokens", "cost_usd", "saved_usd")
-        return [dict(zip(names, row)) for row in rows]
+                 "completion_tokens", "cost_usd", "saved_usd", "demo")
+        return [{**dict(zip(names, row)), "demo": bool(row[-1])} for row in rows]
 
     def cache_stats(self) -> dict:
         """Misses = requests a provider answered (status ok); hits = requests the cache answered.

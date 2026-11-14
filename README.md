@@ -83,7 +83,10 @@ and `/chat`, `/chat/stream`, `/stats/*`, `/health` the API. It listens on `$PORT
    `curl -X POST https://<service>.onrender.com/chat -H "X-API-Key: <client key>" -H "Content-Type: application/json" -d "{\"prompt\": \"hi\"}"`
 
 `DEPLOY_PUBLIC=true` (set in `render.yaml`) refuses to start without client keys and stores no prompt text in
-the request log (`PROMPT_PREVIEW_CHARS` defaults to 0). Free-plan limits: the service sleeps after ~15 minutes
+the request log (`PROMPT_PREVIEW_CHARS` defaults to 0). `DEMO_SEED=true` (also set there) fills an empty request
+log at startup with ~150 made-up requests over the last hour (`DEMO_SEED_REQUESTS`), answered by the fake
+provider through an exact-cache check: no real provider calls, no cost. Those rows say provider `fake`, and the
+dashboard shows a "Demo data" badge; they are not the measured results above. Free-plan limits: the service sleeps after ~15 minutes
 idle (first request then takes ~1 minute), and the disk is wiped on every restart, so the request log, caches
 and dashboard history start empty. `/stats/*` and `/health` are public (no prompt text, but counts and costs are visible).
 

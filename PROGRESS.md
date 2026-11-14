@@ -50,6 +50,7 @@ All 7 phases done. Now: stretch ideas (streaming done; next candidates: cost-awa
 
 - Render deploy as one service: Dockerfile builds the dashboard and the gateway serves it at `/` (`mount_dashboard`, after all API routes), listens on `$PORT`, no Redis needed; `DEPLOY_PUBLIC=true` (needs `GATEWAY_API_KEYS`, prompt previews off by default); `render.yaml` (free plan, Docker, `/health`, secrets `sync: false`); README "Deploy" section. Fix: `PROMPT_PREVIEW_CHARS=0` used to fail the startup number check. Image built and run like Render (`PORT=10000`): dashboard, `/docs`, 401 without key, healthy
 - Live on Render: https://llm-gateway-9rfs.onrender.com (checked 2026-11-15: `/health` ok, dashboard and `/docs` 200, `/chat` 401 without a key); "Live demo" link at the top of the README
+- `DEMO_SEED=true` (on in `render.yaml`): an empty request log gets ~150 fake-provider requests over the last hour at startup (`app/demo.py`; exact-cache check like `/chat`; no real calls, no cost; never touches a non-empty log); `/stats` `demo_data` + "Demo data" badge in the dashboard header. Checked in Docker with dummy provider keys: 150 `fake` rows, 44% hit rate, every minute of the hour filled
 
 ## In progress
 - Nothing
