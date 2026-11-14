@@ -33,6 +33,7 @@ from app.core.cost import estimate_cost
 from app.core.router import AllProvidersFailed, Route, Router
 from app.db.logger import COST_DECIMALS, RequestLog
 from app.providers.base import Provider, ProviderResponse
+from app.providers.fake import FakeProvider
 from app.providers.gemini import GeminiProvider
 from app.providers.groq import GroqProvider
 
@@ -60,7 +61,9 @@ def _make_provider(name: str) -> tuple[Provider, str | None]:
         return GeminiProvider(
             config.GEMINI_API_KEY, config.GEMINI_MODEL, timeout=config.GEMINI_TIMEOUT_SECONDS
         ), config.GEMINI_API_KEY
-    raise ValueError(f"Unknown provider in PROVIDER_ORDER: {name!r} (use groq, gemini)")
+    if name == "fake":  # load tests only: needs no key, so the "key" is just a non-empty marker
+        return FakeProvider(config.FAKE_MODEL, delay_seconds=config.FAKE_DELAY_SECONDS), "no-key-needed"
+    raise ValueError(f"Unknown provider in PROVIDER_ORDER: {name!r} (use groq, gemini, fake)")
 
 
 def build_router() -> Router:
@@ -132,6 +135,7 @@ def build_semantic_cache() -> SemanticCache | None:
         max_entries=config.CACHE_MAX_ENTRIES,
         ttl_seconds=config.CACHE_TTL_SECONDS,
         guard=config.SEMANTIC_GUARD_ENABLED,
+        max_batch=config.SEMANTIC_MAX_BATCH,
     )
 
 
@@ -160,9 +164,11 @@ async def lifespan(app: FastAPI):
     await limiter.aclose()
     if exact_cache is not None:
         await exact_cache.aclose()
+    if semantic_cache is not None:
+        await semantic_cache.aclose()
 
 
-app = FastAPI(title="LLM Gateway", lifespan=lifespan)
+app =FastAPI(title="LLM Gateway", lifespan=lifespan)
 
 
 class ChatRequest(BaseModel):

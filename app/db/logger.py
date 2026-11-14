@@ -23,6 +23,13 @@ class RequestLog:
     def __init__(self, db_path: str) -> None:
         # check_same_thread=False: FastAPI may use this connection from different threads
         self.db = sqlite3.connect(db_path, check_same_thread=False)
+        # Every request commits a row from the event loop. In the default journal mode each commit waits
+        # for the disk (~10 ms on my laptop), which capped the gateway near 64 req/s under load.
+        # WAL appends to a log file instead (~0.1 ms). (It would also let a second, read-only connection
+        # read while this one writes; with one shared connection that doesn't happen yet.)
+        # synchronous=NORMAL: a power cut can lose the last few rows, an app crash can't. Fine for a request log.
+        self.db.execute("PRAGMA journal_mode=WAL")
+        self.db.execute("PRAGMA synchronous=NORMAL")
         self.db.execute(
             """CREATE TABLE IF NOT EXISTS requests (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,

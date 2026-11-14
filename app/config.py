@@ -45,6 +45,10 @@ GEMINI_API_KEY: str | None = os.getenv("GEMINI_API_KEY")
 # Stable, free-tier "flash-lite" model; avoid gemini-2.5-flash (deprecated, rerouted from 2026-12-01)
 GEMINI_MODEL: str = os.getenv("GEMINI_MODEL", "gemini-3.1-flash-lite")
 
+# --- Fake provider (load tests only: PROVIDER_ORDER=fake) ---
+FAKE_MODEL: str = os.getenv("FAKE_MODEL", "fake-llm")
+FAKE_DELAY_SECONDS: float = read_number("FAKE_DELAY_SECONDS", "0.3", allow_zero=True)  # pretend model time
+
 # --- Routing: providers tried in this order (first = main, the rest = backups) ---
 PROVIDER_ORDER: list[str] = [p.strip() for p in os.getenv("PROVIDER_ORDER", "groq,gemini").split(",") if p.strip()]
 
@@ -72,6 +76,8 @@ MODEL_PRICES: dict[str, tuple[float, float]] = {
     "openai/gpt-oss-20b": (0.075, 0.30),
     "openai/gpt-oss-120b": (0.15, 0.60),
     "gemini-3.1-flash-lite": (0.25, 1.50),  # output price includes thinking tokens
+    # Load-test fake priced like gpt-oss-20b, so load tests show realistic spent / saved numbers
+    "fake-llm": (0.075, 0.30),
 }
 
 # --- Client API keys (comma-separated). Every /chat call needs one in the X-API-Key header. ---
@@ -112,6 +118,8 @@ EMBEDDING_MODEL: str = os.getenv("EMBEDDING_MODEL", "sentence-transformers/all-M
 SEMANTIC_CACHE_THRESHOLD: float = read_number("SEMANTIC_CACHE_THRESHOLD", "0.94")
 # Extra word checks before a semantic hit (same numbers, negation, to/from direction). See app/cache/guard.py.
 SEMANTIC_GUARD_ENABLED: bool = read_bool("SEMANTIC_GUARD_ENABLED", "true")
+# Most prompts embedded in one model call (prompts that queue up while a call runs go in the next one)
+SEMANTIC_MAX_BATCH: int = read_number("SEMANTIC_MAX_BATCH", "32", cast=int)
 if SEMANTIC_CACHE_THRESHOLD > 1:
     raise ValueError(f"SEMANTIC_CACHE_THRESHOLD must be at most 1, got {SEMANTIC_CACHE_THRESHOLD}")
 

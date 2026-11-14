@@ -76,6 +76,7 @@ class SemanticCache:
         ttl_seconds: float,
         guard: bool = True,
         clock: Callable[[], float] = time.monotonic,
+        max_batch: int = 32,
     ) -> None:
         if not 0 < threshold <= 1:
             raise ValueError("threshold must be in (0, 1]")
@@ -91,15 +92,59 @@ class SemanticCache:
         self._features: list[Features | None] = [None] * max_entries  # guard checks, computed once per entry
         self.guard = guard
         self.guard_blocks = 0  # matches above the threshold that the guard turned down
-        # One embedding at a time: the tokenizer isn't safe to share between threads,
+        # One embedding call at a time: the tokenizer isn't safe to share between threads,
         # and parallel torch calls would just fight over the same CPU cores.
-        self._embed_lock = asyncio.Lock()
+        # Instead, prompts that arrive while a call is running wait in _pending and are embedded
+        # together in the next call (micro-batching): on my laptop 17.6 ms per prompt alone,
+        # ~5 ms per prompt in a batch of 8+. Nobody waits for a batch to "fill up".
+        self.max_batch = max_batch
+        self._pending: list[tuple[str, asyncio.Future]] = []
+        self._worker: asyncio.Task | None = None
 
     async def embed(self, prompt: str) -> np.ndarray:
-        """Embed in a worker thread so the event loop keeps serving other requests meanwhile."""
-        async with self._embed_lock:
-            vectors = await asyncio.to_thread(self.embedder.embed, [normalise_prompt(prompt)])
-        return unit_vectors(vectors)[0]
+        """Queue the prompt for the next batch and wait for its vector."""
+        loop = asyncio.get_running_loop()
+        if self._worker is not None and self._worker.get_loop() is not loop:
+            # A worker from an event loop that has closed (e.g. between tests) will never run again
+            self._worker, self._pending = None, []
+        future = loop.create_future()
+        self._pending.append((normalise_prompt(prompt), future))
+        if self._worker is None or self._worker.done():
+            self._worker = asyncio.create_task(self._embed_pending())
+        return await future
+
+    async def _embed_pending(self) -> None:
+        """Embed waiting prompts in batches (in a worker thread, so the event loop keeps serving) until none are left."""
+        batch: list[tuple[str, asyncio.Future]] = []
+        try:
+            while self._pending:
+                batch, self._pending = self._pending[: self.max_batch], self._pending[self.max_batch :]
+                try:
+                    vectors = unit_vectors(await asyncio.to_thread(self.embedder.embed, [text for text, _ in batch]))
+                    results = list(zip(batch, vectors, strict=True))  # one vector per prompt, or it's an error
+                except Exception as e:  # every request in the batch gets the error (they skip the semantic cache)
+                    for _, future in batch:
+                        if not future.done():
+                            future.set_exception(e)
+                    continue
+                for (_, future), vector in results:
+                    if not future.done():  # done = that request was cancelled (client went away)
+                        future.set_result(vector)
+        finally:
+            # Worker cancelled (shutdown): nobody may be left waiting on a future that will never be set
+            for _, future in batch + self._pending:
+                if not future.done():
+                    future.cancel()
+            self._pending = []
+
+    async def aclose(self) -> None:
+        """At shutdown: cancel prompts still queued, then let the batch already in the model finish.
+        (Cancelling mid-batch would leave its thread running, and the next call could overlap it.)"""
+        for _, future in self._pending:
+            future.cancel()
+        self._pending = []
+        if self._worker is not None and not self._worker.done():
+            await self._worker
 
     def lookup(self, vector: np.ndarray, prompt: str | None = None) -> SemanticHit | None:
         """Best live match at or above the threshold that the guard accepts.

@@ -35,15 +35,24 @@ Phase 7 — prove it (plan approved: fake provider + Locust, Docker, CI, README)
 - Phase 6 review fixes: one poll at a time (next scheduled after the last finishes), range change aborts the old request, index on `requests.ts`, oldest bucket no longer cut short, NULL status / latency rows don't crash; latency points visible when traffic is sparse, `bucket` longer than the window rejected (422), "spent" counts only provider answers (same as `/stats`)
 - Phase 6 verified: 409 tests pass, dashboard builds, a row added while the gateway runs shows up in the dashboard API and charts
 - Phase 4 money saved: `loadtest/savings_replay.py` + `loadtest/prompt_mix.json`, 300 requests against real Groq: 86 provider calls, 158 exact + 56 semantic hits (71.3%), 0 wrong semantic hits seen, cost cut 75.1% ($0.0135 spent, $0.0408 saved); in README. Phase 4 done
+- Phase 7 Step 1: fake provider (`app/providers/fake.py`, `PROVIDER_ORDER=fake`, `FAKE_DELAY_SECONDS`)
+- Phase 7 Step 2: Locust load test (`loadtest/locustfile.py`, results in `loadtest/results.md`), 200 users, 0 errors: no cache 523 req/s p95 340 ms; exact cache 779 req/s p95 390 ms; exact + semantic 378 req/s p95 1,200 ms
+- Load-test fixes: SQLite WAL mode (64 → 128 req/s at 50 users, p50 670 → 300 ms); micro-batched embeddings (semantic run 137 → 378 req/s, p95 5.9 s → 1.2 s); review fixes for the batcher (shutdown, closed event loop, wrong vector count)
+- Phase 7 Steps 3–4 written: `Dockerfile` (semantic deps via `--build-arg SEMANTIC=true`), `dashboard/Dockerfile` + `nginx.conf`, `docker-compose.yml` (gateway + Redis + dashboard), `.github/workflows/tests.yml` (pytest, dashboard build, compose build). 419 tests pass with no `.env`; dashboard builds
 
 ## In progress
-- Nothing
+- Docker files not run yet: Docker isn't installed on this laptop (CI's `docker compose build` job will be the first check)
+- Phase 7 Step 5: README (Mermaid diagram, docker quick start, load-test table, resume bullet)
 
 ## Open bugs / questions
 - Gemini free tier is slow and unpredictable (1–22 s for tiny answers, one 30 s timeout)
 - Fallback through slow Gemini took 7–24 s per request in the demo (timeouts are retried up to 3 × 10 s)
 - `/stats`, `/stats/timeseries` and `/health` need no API key yet (fine locally; lock down before deploying)
-- One SQLite connection is shared by the event loop (logging) and threadpool handlers (stats); may need a lock or a separate read connection under Locust load
+- One SQLite connection is shared by the event loop (logging) and threadpool handlers (stats); no errors in Locust runs, but nothing polled `/stats` during them; a separate read connection would be safer
+- Under the semantic load test, exact-cache hits slow down too (p50 360 ms): the embedding model uses the same CPU cores as the event loop
+- Semantic hits aren't copied into the exact cache, so a repeated paraphrase is embedded every time
+- The embedding queue has no size limit: under overload, waiting time grows without bound
+- `tests/test_cost.py` `tmp_path` setup sometimes takes 4–60 s on this laptop (Windows temp folder; same before Phase 7)
 - Dashboard "Requests" tile can't show client requests that failed on every provider (only per-attempt `error` rows exist); log one `failed` row per 503 before Phase 7
 - Dashboard: if one of the three stats calls fails, the whole refresh is skipped and the banner says the gateway is unreachable
 - Rate-limited (429) requests are not logged to the database yet
@@ -60,9 +69,9 @@ Phase 7 — prove it (plan approved: fake provider + Locust, Docker, CI, README)
 - `matplotlib` not installed, so `eval/tradeoff.png` isn't drawn yet
 
 ## Next steps
-1. Phase 7 step 1–2: fake provider (`PROVIDER_ORDER=fake`) + Locust load test (req/s, p50/p95/p99, error rate; cache off / exact / exact + semantic)
-2. Phase 7 step 3–4: Dockerfile + docker-compose (gateway + Redis + dashboard via nginx), GitHub Actions (pytest + dashboard build)
-3. Phase 7 step 5: README with Mermaid architecture diagram, dashboard screenshot, filled resume bullet
+1. Push and check the GitHub Actions run is green (first real test of the Docker build)
+2. Install Docker Desktop, run `docker compose up --build`, check `/chat` on :8000 and the dashboard on :8080
+3. Phase 7 step 5: README with Mermaid architecture diagram, docker quick start, load-test table, dashboard screenshot, filled resume bullet
 4. Optional: remove "last" from the guard's number words, then write a fresh hold-out set before re-measuring
 
 ## To learn later
@@ -97,6 +106,12 @@ Phase 7 — prove it (plan approved: fake provider + Locust, Docker, CI, README)
 - `dashboard/src/App.jsx` — React state + effect; polling with `setInterval` and cleanup; Vite dev proxy instead of CORS
 - `dashboard/src/Charts.jsx` — recharts stacked bars and lines; one y-axis per chart; tooltips and legends
 - `loadtest/savings_replay.py` — Zipf-shaped traffic; hit rate and cost cut depend on how repetitive traffic is; seeded randomness for repeatable runs
+- `app/providers/fake.py` — fake dependency for load tests; measuring your own system, not someone else's rate limit
+- `loadtest/locustfile.py` — Locust users, wait time, req/s vs p95; why the client machine can be the bottleneck
+- `app/db/logger.py` — SQLite WAL vs rollback journal; `synchronous`; why a blocking call on the event loop caps throughput
+- `app/cache/semantic.py` `embed` — micro-batching with futures; one worker task; cancelling safely at shutdown
+- `Dockerfile` / `docker-compose.yml` — image layers and caching; build args; healthchecks; service names as hostnames; volumes
+- `.github/workflows/tests.yml` — CI jobs; caching pip/npm; keeping heavy deps out of CI
 
 ## To rebuild myself later
 - `app/core/retry.py` — retry with exponential backoff and jitter
@@ -114,6 +129,7 @@ Phase 7 — prove it (plan approved: fake provider + Locust, Docker, CI, README)
 - Cross-instance dedup: Redis `SET NX` lock per prompt + pub/sub to hand the answer to other instances
 - Small cross-encoder re-check for semantic hits, to catch antonyms the guard misses
 - Re-run the savings replay with `--zipf 0.6` and `--zipf 1.4` to show how hit rate changes with traffic shape
+- Store a semantic hit in the exact cache under the new wording, so the next identical paraphrase skips the embedding
 - `/stats/timeseries`: count per bucket in SQL (`GROUP BY`) and pull only `ok` latencies into Python, for 1M+ row tables
 
 ## Interview practice questions
@@ -135,6 +151,9 @@ Phase 7 — prove it (plan approved: fake provider + Locust, Docker, CI, README)
 - Your cache cut cost by 75% on the replay. Why might it be much lower in production, and what traffic shape would you need to know?
 - Why was the replay sent one request at a time instead of all at once?
 - The stats query filters on `ts` every few seconds. What does an index on `ts` change, and what does it cost on every insert?
+- A 10 ms SQLite commit capped the gateway at ~64 req/s even though the provider took 300 ms. Why does a blocking call on the event loop hurt every request, not just its own?
+- How does micro-batching cut embedding cost without making a single request wait longer when traffic is light?
+- Why do the load tests use a fake provider, and what would the numbers measure if they hit Groq's free tier instead?
 
 ## Session log
 | Date | What we did |
@@ -147,3 +166,4 @@ Phase 7 — prove it (plan approved: fake provider + Locust, Docker, CI, README)
 | 2026-11-14 | Semantic guard (numbers, negation, direction); false hits 22% → 3% at 0.94; 30-pair hold-out set |
 | 2026-11-14 | Phase 6: `/stats/timeseries` endpoint + React dashboard (requests, latency p50/p95, cost, breaker states) |
 | 2026-11-14 | Money saved on a 300-request replay (71.3% hits, 75.1% cost cut); Phase 4 done; Phase 7 planned |
+| 2026-11-14 | Phase 7 Steps 1–4: fake provider, Locust (523 / 779 / 378 req/s), WAL + embedding batching fixes, Docker + compose, CI |

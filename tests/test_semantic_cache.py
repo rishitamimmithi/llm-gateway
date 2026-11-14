@@ -2,6 +2,8 @@
 Semantic cache tests with a fake embedder: each prompt maps to a hand-picked vector,
 so similarities are known exactly and no model is downloaded.
 """
+import asyncio
+
 import numpy as np
 import pytest
 
@@ -168,10 +170,80 @@ class OneAtATimeEmbedder(FakeEmbedder):
 
 
 @pytest.mark.asyncio
-async def test_concurrent_embeds_run_one_at_a_time():
-    import asyncio
+async def test_concurrent_embeds_are_batched_one_call_at_a_time():
+    embedder = OneAtATimeEmbedder(TABLE)
+    cache = SemanticCache(embedder, threshold=0.9, max_entries=10, ttl_seconds=60, max_batch=8)
+    prompts = ["capital of France?", "capital of Spain?", "unrelated"] * 7  # 21 prompts at once
+    vectors = await asyncio.gather(*(cache.embed(p) for p in prompts))
+    assert embedder.calls == 3  # 8 + 8 + 5, never two calls at the same time
+    for prompt, vector in zip(prompts, vectors):  # each caller gets its own prompt's vector back
+        np.testing.assert_allclose(vector, unit_vectors(np.array([TABLE[prompt]]))[0])
 
+
+@pytest.mark.asyncio
+async def test_prompts_arriving_during_a_batch_go_in_the_next_one():
     embedder = OneAtATimeEmbedder(TABLE)
     cache = SemanticCache(embedder, threshold=0.9, max_entries=10, ttl_seconds=60)
-    vectors = await asyncio.gather(*(cache.embed("capital of France?") for _ in range(20)))
-    assert len(vectors) == 20 and embedder.calls == 20
+    first = asyncio.create_task(cache.embed("capital of France?"))
+    await asyncio.sleep(0)  # first batch (1 prompt) starts
+    later = [asyncio.create_task(cache.embed("unrelated")) for _ in range(5)]
+    await asyncio.gather(first, *later)
+    assert embedder.calls == 2  # [first], then the 5 that waited
+
+
+class BrokenEmbedder(FakeEmbedder):
+    def embed(self, texts):
+        self.calls += 1
+        if self.calls == 1:
+            raise RuntimeError("model crashed")
+        return super().embed(texts)
+
+
+@pytest.mark.asyncio
+async def test_embedding_error_reaches_every_caller_in_the_batch_then_recovers():
+    cache = SemanticCache(BrokenEmbedder(TABLE), threshold=0.9, max_entries=10, ttl_seconds=60)
+    results = await asyncio.gather(*(cache.embed("unrelated") for _ in range(3)), return_exceptions=True)
+    assert all(isinstance(r, RuntimeError) for r in results)
+    assert (await cache.embed("unrelated")).tolist() == [0, 0, 1]  # next call works again
+
+
+class ShortEmbedder(FakeEmbedder):
+    def embed(self, texts):
+        return super().embed(texts)[:-1]  # one vector missing
+
+
+@pytest.mark.asyncio
+async def test_too_few_vectors_is_an_error_not_a_hang():
+    cache = SemanticCache(ShortEmbedder(TABLE), threshold=0.9, max_entries=10, ttl_seconds=60)
+    results = await asyncio.gather(*(cache.embed("unrelated") for _ in range(2)), return_exceptions=True)
+    assert all(isinstance(r, ValueError) for r in results)
+
+
+@pytest.mark.asyncio
+async def test_aclose_finishes_the_running_batch_and_cancels_the_queue():
+    cache = SemanticCache(OneAtATimeEmbedder(TABLE), threshold=0.9, max_entries=10, ttl_seconds=60)
+    running = asyncio.create_task(cache.embed("capital of France?"))
+    await asyncio.sleep(0)  # first batch starts
+    waiting = asyncio.create_task(cache.embed("unrelated"))
+    await asyncio.sleep(0)
+    await cache.aclose()
+    assert (await running).tolist() == [1, 0, 0]
+    with pytest.raises(asyncio.CancelledError):
+        await waiting
+    assert (await cache.embed("unrelated")).tolist() == [0, 0, 1]  # a new worker starts later
+
+
+def test_worker_from_a_closed_event_loop_is_replaced():
+    cache = SemanticCache(FakeEmbedder(TABLE), threshold=0.9, max_entries=10, ttl_seconds=60)
+    asyncio.run(cache.embed("unrelated"))
+    assert asyncio.run(cache.embed("unrelated")).tolist() == [0, 0, 1]
+
+
+@pytest.mark.asyncio
+async def test_cancelled_caller_does_not_break_the_batch():
+    cache = SemanticCache(OneAtATimeEmbedder(TABLE), threshold=0.9, max_entries=10, ttl_seconds=60)
+    gone = asyncio.create_task(cache.embed("capital of France?"))
+    stays = asyncio.create_task(cache.embed("unrelated"))
+    await asyncio.sleep(0)
+    gone.cancel()  # client went away mid-batch
+    assert (await stays).tolist() == [0, 0, 1]
