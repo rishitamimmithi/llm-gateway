@@ -1,0 +1,42 @@
+# Gateway + Redis + dashboard:  docker compose up --build
+#   gateway:   http://localhost:8000  (POST /chat with an X-API-Key from .env)
+#   dashboard: http://localhost:8080
+# Keys and settings come from .env (copy .env.example). Without .env set PROVIDER_ORDER=fake to try it with no provider keys.
+services:
+  redis:
+    image: redis:7.4-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  gateway:
+    build:
+      context: .
+      args:
+        SEMANTIC: ${SEMANTIC:-false}
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      REDIS_URL: redis://redis:6379/0  # shared rate limits + exact cache
+      DB_PATH: /data/requests.db
+    ports:
+      - "8000:8000"
+    volumes:
+      - gateway-data:/data  # request log survives restarts
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  dashboard:
+    build: ./dashboard
+    ports:
+      - "8080:80"
+    depends_on:
+      gateway:
+        condition: service_healthy
+
+volumes:
+  gateway-data:

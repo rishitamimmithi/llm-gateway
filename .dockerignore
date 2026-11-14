@@ -1,0 +1,16 @@
+# Keep secrets, local state and big folders out of the build context
+.env
+.env.*
+.git
+.venv
+**/__pycache__
+.pytest_cache
+*.db
+*.db-wal
+*.db-shm
+dashboard/node_modules
+dashboard/dist
+tests
+eval
+loadtest
+*.md
